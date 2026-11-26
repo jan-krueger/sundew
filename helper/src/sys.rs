@@ -322,7 +322,12 @@ pub fn exit(code: i32) -> ! {
     unsafe { libc::_exit(code) }
 }
 
-pub fn set_rlimit(res: libc::__rlimit_resource_t, v: u64) -> io::Result<()> {
+#[cfg(target_env = "gnu")]
+pub type RlimitResource = libc::__rlimit_resource_t;
+#[cfg(not(target_env = "gnu"))]
+pub type RlimitResource = libc::c_int;
+
+pub fn set_rlimit(res: RlimitResource, v: u64) -> io::Result<()> {
     let r = libc::rlimit {
         rlim_cur: v,
         rlim_max: v,
@@ -391,7 +396,7 @@ pub fn recv(fd: i32, buf: &mut [u8]) -> io::Result<(usize, i32)> {
     m.msg_iov = &mut iov;
     m.msg_iovlen = 1;
     m.msg_control = cmsg.as_mut_ptr() as *mut _;
-    m.msg_controllen = cmsg.len();
+    m.msg_controllen = cmsg.len() as _;
     let n = unsafe {
         libc::recvmsg(
             fd,
