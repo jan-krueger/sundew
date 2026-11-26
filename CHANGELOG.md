@@ -30,6 +30,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   start only without capabilities.
 - nginx refuses to start, or keeps its old configuration on reload, when a set
   is missing or of an unsupported type.
-- Tested on nginx 1.24.0 and 1.30.8, including builds with AddressSanitizer
+- Docker images on GHCR: the official nginx image, stable and mainline, Debian
+  and Alpine, amd64 and arm64, with Sundew installed and loaded.
+- Prebuilt modules and a static helper for nginx.org 1.30.8 and 1.31.10
+  (Debian and Alpine), Debian 13's nginx 1.26.3 and Ubuntu 24.04's nginx
+  1.24.0, for amd64 and arm64, with checksums and build provenance.
+- Tested on nginx 1.24.0, 1.30.8 and 1.31.10, including builds with AddressSanitizer
   and UndefinedBehaviorSanitizer, across reloads, binary upgrades, worker and
   helper crashes, client aborts and HTTP/2 and HTTP/3 stream resets.

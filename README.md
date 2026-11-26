@@ -7,13 +7,15 @@ ipsets. A set changed by fail2ban, CrowdSec or an admin applies to the next
 request, with no reload. It works behind CDNs and load balancers through
 nginx's `realip` module, for IPv4 and IPv6, over HTTP/1.1, HTTP/2 and HTTP/3.
 
-```nginx
-load_module modules/ngx_http_sundew_module.so;
-
-http {
-    ipset_blacklist bad_guys;
-}
+```bash
+echo 'ipset_blacklist bad_guys;' > sundew.conf
+docker run -d --cap-add NET_ADMIN --network host \
+    -v "$PWD/sundew.conf:/etc/nginx/conf.d/sundew.conf:ro" ghcr.io/jan-krueger/sundew:latest
 ```
+
+Prebuilt modules exist for the nginx.org packages, Debian 13 and Ubuntu 24.04;
+any other nginx 1.24+ builds from source. See
+[Getting started](docs/getting-started.md).
 
 nginx workers keep no privileges. A small helper that nginx starts and
 supervises is the only process with `CAP_NET_ADMIN`; it runs under seccomp and
@@ -30,7 +32,7 @@ move over; see [Compatibility](docs/internals/compatibility.md).
 
 | | |
 | --- | --- |
-| [Getting started](docs/getting-started.md) | Build, install, block a set |
+| [Getting started](docs/getting-started.md) | Docker image, prebuilt module or source; block a set |
 | [Configuration](docs/configuration.md) | Directives and variables |
 | [Security model](docs/security.md) | What each process may do |
 | [Monitoring](docs/monitoring.md) | JSON and Prometheus counters |

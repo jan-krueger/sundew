@@ -4,7 +4,7 @@
 
 | | Versions |
 | --- | --- |
-| nginx | 1.24.0, 1.30.8 |
+| nginx | 1.24.0, 1.30.8, 1.31.10 |
 | Linux | 7.2 |
 | Protocols | HTTP/1.1, HTTP/2, HTTP/3 (nginx with `http_v3_module`) |
 | Set types | `hash:ip`, `hash:net`, `bitmap:ip`; IPv4 and IPv6 |
@@ -13,7 +13,9 @@ Every test also runs nginx built with AddressSanitizer and
 UndefinedBehaviorSanitizer.
 
 - The module needs nginx built with `--with-compat` and the same version it was
-  built against.
+  built against. Prebuilt modules exist for the builds listed in
+  [Getting started](../getting-started.md#option-b-prebuilt-module); each is
+  loaded by that nginx with `nginx -t` while it is built.
 - Older kernels are untested. Ambient capabilities need Linux 4.3. Without
   `pidfd_open` (5.3) nginx tracks the helper by process ID; without Landlock
   (5.13) the helper runs with seccomp only.
