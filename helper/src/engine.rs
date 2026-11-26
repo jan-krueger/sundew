@@ -250,6 +250,11 @@ fn harden() {
     ];
     allow.extend_from_slice(arch_only);
 
+    match sys::landlock_deny_all() {
+        Ok(abi) => eprintln!("sundew-helper: landlock enforced (abi {abi})"),
+        Err(e) => eprintln!("sundew-helper: landlock unavailable: {e}"),
+    }
+
     if let Err(e) = sys::seccomp_allowlist(&allow, &[libc::SYS_clone3]) {
         fail(proto::ERR_SANDBOX, "seccomp", Some(e));
     }

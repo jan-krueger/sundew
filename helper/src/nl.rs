@@ -220,6 +220,28 @@ pub fn attrs(mut b: &[u8]) -> impl Iterator<Item = Result<(u16, &[u8]), &'static
 mod tests {
     use super::*;
     use crate::proto::Addr;
+    use crate::proto::fuzz::Rng;
+
+    #[test]
+    fn fuzz_parse() {
+        let mut rng = Rng::new(0x6e6c);
+        let seed = msg_test(1, 7, b"set", &Addr::V6([1; 16]));
+        for _ in 0..200_000 {
+            let input = rng.input(&seed, 96);
+            if let Ok(msgs) = parse(&input) {
+                for m in msgs {
+                    if let Reply::Data { attrs: a, .. } = m {
+                        for r in attrs(a) {
+                            let _ = r;
+                        }
+                    }
+                }
+            }
+            for r in attrs(&input) {
+                let _ = r;
+            }
+        }
+    }
 
     #[test]
     fn test_msg_layout() {

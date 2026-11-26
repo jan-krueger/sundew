@@ -522,6 +522,65 @@ fn jump(code: u16, k: u32, jt: u8, jf: u8) -> SockFilter {
     SockFilter { code, jt, jf, k }
 }
 
+// ---- landlock ----------------------------------------------------------
+
+#[repr(C)]
+struct LandlockRulesetAttr {
+    handled_access_fs: u64,
+    handled_access_net: u64,
+    scoped: u64,
+}
+
+/// Restricts the process to no filesystem access, no TCP bind/connect and
+/// (ABI 6+) no abstract unix sockets or signals.  Returns the ABI used.
+pub fn landlock_deny_all() -> io::Result<u32> {
+    // SAFETY: version query: NULL attr, size 0.
+    let abi = check(unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<u8>(),
+            0usize,
+            1u32,
+        )
+    })? as u32;
+
+    let mut fs: u64 = (1 << 13) - 1;
+    if abi >= 2 {
+        fs |= 1 << 13;
+    }
+    if abi >= 3 {
+        fs |= 1 << 14;
+    }
+    if abi >= 5 {
+        fs |= 1 << 15;
+    }
+    let attr = LandlockRulesetAttr {
+        handled_access_fs: fs,
+        handled_access_net: if abi >= 4 { 0b11 } else { 0 },
+        scoped: if abi >= 6 { 0b11 } else { 0 },
+    };
+    let size: usize = match abi {
+        0..=3 => 8,
+        4 | 5 => 16,
+        _ => 24,
+    };
+
+    // SAFETY: attr outlives the call; size never exceeds the struct.
+    let fd = check(unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            &attr as *const LandlockRulesetAttr,
+            size,
+            0u32,
+        )
+    })? as i32;
+    // SAFETY: plain syscall on our own fd.
+    let r = check(unsafe { libc::syscall(libc::SYS_landlock_restrict_self, fd, 0u32) });
+    close(fd);
+    r?;
+    Ok(abi)
+}
+
 pub fn seccomp_allowlist(allow: &[libc::c_long], enosys: &[libc::c_long]) -> io::Result<()> {
     let mut f = vec![
         stmt(BPF_LD_W_ABS, 4), // seccomp_data.arch

@@ -230,8 +230,68 @@ pub fn encode_rep(status: u8, req_id: u32, decided: u64, matched: u64) -> [u8; R
 }
 
 #[cfg(test)]
+pub(crate) mod fuzz {
+    pub struct Rng(u64);
+
+    impl Rng {
+        pub fn new(seed: u64) -> Rng {
+            Rng(seed | 1)
+        }
+        pub fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        pub fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+        /// Random bytes, or a mutated copy of `seed`.
+        pub fn input(&mut self, seed: &[u8], max: usize) -> Vec<u8> {
+            if seed.is_empty() || self.below(4) == 0 {
+                let n = self.below(max + 1);
+                return (0..n).map(|_| self.next() as u8).collect();
+            }
+            let mut v = seed.to_vec();
+            for _ in 0..=self.below(4) {
+                match self.below(3) {
+                    0 if !v.is_empty() => {
+                        let i = self.below(v.len());
+                        v[i] ^= 1 << self.below(8);
+                    }
+                    1 => v.truncate(self.below(v.len() + 1)),
+                    _ => v.push(self.next() as u8),
+                }
+            }
+            v
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::fuzz::Rng;
     use super::*;
+
+    #[test]
+    fn fuzz_decoders() {
+        let mut rng = Rng::new(0x5357_5357);
+        let good_req = req(4, 1);
+        let mut good_policy = vec![0u8; POLICY_HDR_LEN + POLICY_SET_LEN];
+        good_policy[0..4].copy_from_slice(&POLICY_MAGIC.to_ne_bytes());
+        good_policy[4..6].copy_from_slice(&POLICY_VERSION.to_ne_bytes());
+        good_policy[6..8].copy_from_slice(&1u16.to_ne_bytes());
+        good_policy[8..12].copy_from_slice(&2u32.to_ne_bytes());
+        good_policy[POLICY_HDR_LEN..POLICY_HDR_LEN + 3].copy_from_slice(b"bad");
+        good_policy[POLICY_HDR_LEN + SETNAME_LEN] = ROLE_LOOKUP;
+        assert!(Policy::decode(&good_policy).is_ok());
+
+        for _ in 0..200_000 {
+            let _ = decode_req(&rng.input(&good_req, 64));
+            let _ = decode_drain(&rng.input(&[], 32));
+            let _ = Policy::decode(&rng.input(&good_policy, 128));
+        }
+    }
 
     fn req(fam: u8, mask: u64) -> [u8; REQ_LEN] {
         let mut b = [0u8; REQ_LEN];
