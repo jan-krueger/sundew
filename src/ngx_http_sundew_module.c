@@ -24,18 +24,18 @@
 
 #define SW_V_UNKNOWN        0
 #define SW_V_ALLOW          1
-#define SW_V_ALLOW_WL       2
-#define SW_V_DENY_BL        3
-#define SW_V_DENY_NOT_WL    4
+#define SW_V_ALLOW_LISTED       2
+#define SW_V_DENY_LISTED        3
+#define SW_V_DENY_NOT_ALLOWED    4
 
 #define SW_STALE_MS         (600 * 1000)
 
 
 typedef struct {
-    uint64_t     blacklist;
-    uint64_t     whitelist;
-    ngx_uint_t   blacklist_set;
-    ngx_uint_t   whitelist_set;
+    uint64_t     deny;
+    uint64_t     allow;
+    ngx_uint_t   deny_set;
+    ngx_uint_t   allow_set;
     ngx_uint_t   status;
     ngx_flag_t   fail_open;
     ngx_flag_t   dryrun;
@@ -71,6 +71,22 @@ static char *ngx_http_sundew_endpoint(ngx_conf_t *cf, ngx_command_t *cmd,
 
 
 static ngx_command_t  ngx_http_sundew_commands[] = {
+
+    { ngx_string("ipset_denylist"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
+      ngx_http_sundew_sets,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    { ngx_string("ipset_allowlist"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
+      ngx_http_sundew_sets,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      1,
+      NULL },
+
+    /* names used by ngx_http_ipset_access_module */
 
     { ngx_string("ipset_blacklist"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
@@ -229,22 +245,22 @@ ngx_http_sundew_client_addr(ngx_http_request_t *r, ngx_uint_t *family,
 
 
 static ngx_uint_t
-ngx_http_sundew_evaluate(uint64_t decided, uint64_t matched, uint64_t bl,
-    uint64_t wl, ngx_uint_t has_wl)
+ngx_http_sundew_evaluate(uint64_t decided, uint64_t matched, uint64_t dmask,
+    uint64_t amask, ngx_uint_t has_allow)
 {
-    if (has_wl) {
-        if (matched & wl) {
-            return SW_V_ALLOW_WL;
+    if (has_allow) {
+        if (matched & amask) {
+            return SW_V_ALLOW_LISTED;
         }
 
-        return ((decided & wl) == wl) ? SW_V_DENY_NOT_WL : SW_V_UNKNOWN;
+        return ((decided & amask) == amask) ? SW_V_DENY_NOT_ALLOWED : SW_V_UNKNOWN;
     }
 
-    if (matched & bl) {
-        return SW_V_DENY_BL;
+    if (matched & dmask) {
+        return SW_V_DENY_LISTED;
     }
 
-    return ((decided & bl) == bl) ? SW_V_ALLOW : SW_V_UNKNOWN;
+    return ((decided & dmask) == dmask) ? SW_V_ALLOW : SW_V_UNKNOWN;
 }
 
 
@@ -286,7 +302,7 @@ ngx_http_sundew_deny(ngx_http_request_t *r, ngx_http_sundew_loc_conf_t *slcf,
 
 static ngx_int_t
 ngx_http_sundew_apply(ngx_http_request_t *r, ngx_http_sundew_loc_conf_t *slcf,
-    ngx_http_sundew_ctx_t *ctx, ngx_uint_t v, uint64_t bl, uint64_t wl)
+    ngx_http_sundew_ctx_t *ctx, ngx_uint_t v, uint64_t dmask, uint64_t amask)
 {
     uint64_t  hit;
 
@@ -294,17 +310,17 @@ ngx_http_sundew_apply(ngx_http_request_t *r, ngx_http_sundew_loc_conf_t *slcf,
 
     switch (v) {
 
-    case SW_V_DENY_BL:
-        hit = ctx->matched & bl;
+    case SW_V_DENY_LISTED:
+        hit = ctx->matched & dmask;
         ctx->matched_set = (ngx_int_t) __builtin_ctzll(hit);
         sw_stats_set_matched(ctx->matched_set);
-        return ngx_http_sundew_deny(r, slcf, ctx, "blacklisted");
+        return ngx_http_sundew_deny(r, slcf, ctx, "in denylist");
 
-    case SW_V_DENY_NOT_WL:
-        return ngx_http_sundew_deny(r, slcf, ctx, "not whitelisted");
+    case SW_V_DENY_NOT_ALLOWED:
+        return ngx_http_sundew_deny(r, slcf, ctx, "not in allowlist");
 
-    case SW_V_ALLOW_WL:
-        hit = ctx->matched & wl;
+    case SW_V_ALLOW_LISTED:
+        hit = ctx->matched & amask;
         ctx->matched_set = (ngx_int_t) __builtin_ctzll(hit);
         sw_stats_set_matched(ctx->matched_set);
         /* fall through */
@@ -346,13 +362,13 @@ ngx_http_sundew_fail(ngx_http_request_t *r, ngx_http_sundew_loc_conf_t *slcf,
 
 static ngx_int_t
 ngx_http_sundew_finish(ngx_http_request_t *r, ngx_http_sundew_loc_conf_t *slcf,
-    ngx_http_sundew_ctx_t *ctx, uint64_t bl, uint64_t wl)
+    ngx_http_sundew_ctx_t *ctx, uint64_t dmask, uint64_t amask)
 {
-    ngx_uint_t    v, has_wl, result;
+    ngx_uint_t    v, has_allow, result;
     sw_waiter_t  *w;
 
     w = &ctx->waiter;
-    has_wl = (slcf->whitelist != 0);
+    has_allow = (slcf->allow != 0);
     result = w->result;
 
     if (result == SW_RESULT_OK) {
@@ -360,22 +376,22 @@ ngx_http_sundew_finish(ngx_http_request_t *r, ngx_http_sundew_loc_conf_t *slcf,
         ctx->matched |= w->matched & w->decided & ctx->asked;
     }
 
-    v = ngx_http_sundew_evaluate(ctx->decided, ctx->matched, bl, wl, has_wl);
+    v = ngx_http_sundew_evaluate(ctx->decided, ctx->matched, dmask, amask, has_allow);
 
     if (v != SW_V_UNKNOWN) {
-        return ngx_http_sundew_apply(r, slcf, ctx, v, bl, wl);
+        return ngx_http_sundew_apply(r, slcf, ctx, v, dmask, amask);
     }
 
     if (ctx->stale_in) {
         ctx->decided |= ctx->stale_in;
         ctx->matched |= ctx->stale_in;
 
-        v = ngx_http_sundew_evaluate(ctx->decided, ctx->matched, bl, wl,
-                                     has_wl);
+        v = ngx_http_sundew_evaluate(ctx->decided, ctx->matched, dmask, amask,
+                                     has_allow);
 
         if (v != SW_V_UNKNOWN) {
             sw_stats_inc(SW_STAT_STALE_SERVED);
-            return ngx_http_sundew_apply(r, slcf, ctx, v, bl, wl);
+            return ngx_http_sundew_apply(r, slcf, ctx, v, dmask, amask);
         }
     }
 
@@ -461,8 +477,8 @@ static ngx_int_t
 ngx_http_sundew_handler(ngx_http_request_t *r)
 {
     u_char                       addr[16];
-    uint64_t                     famask, bl, wl, need, ask;
-    ngx_uint_t                   family, v, has_wl;
+    uint64_t                     famask, dmask, amask, need, ask;
+    ngx_uint_t                   family, v, has_allow;
     ngx_pool_cleanup_t          *cln;
     ngx_http_sundew_ctx_t       *ctx;
     ngx_sundew_core_conf_t      *scf;
@@ -474,7 +490,7 @@ ngx_http_sundew_handler(ngx_http_request_t *r)
 
     slcf = ngx_http_get_module_loc_conf(r, ngx_http_sundew_module);
 
-    if (slcf->blacklist == 0 && slcf->whitelist == 0) {
+    if (slcf->deny == 0 && slcf->allow == 0) {
         return NGX_DECLINED;
     }
 
@@ -484,9 +500,9 @@ ngx_http_sundew_handler(ngx_http_request_t *r)
 
     scf = ngx_http_sundew_core_conf();
     famask = (family == 4) ? scf->mask4 : scf->mask6;
-    bl = slcf->blacklist & famask;
-    wl = slcf->whitelist & famask;
-    has_wl = (slcf->whitelist != 0);
+    dmask = slcf->deny & famask;
+    amask = slcf->allow & famask;
+    has_allow = (slcf->allow != 0);
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_sundew_module);
 
@@ -504,7 +520,7 @@ ngx_http_sundew_handler(ngx_http_request_t *r)
 
             r->write_event_handler = ngx_http_request_empty_handler;
             r->read_event_handler = ngx_http_block_reading;
-            return ngx_http_sundew_finish(r, slcf, ctx, bl, wl);
+            return ngx_http_sundew_finish(r, slcf, ctx, dmask, amask);
 
         default:
             return NGX_DECLINED;
@@ -525,18 +541,18 @@ ngx_http_sundew_handler(ngx_http_request_t *r)
 
     sw_stats_inc(SW_STAT_CHECKED);
 
-    need = has_wl ? wl : bl;
+    need = has_allow ? amask : dmask;
 
     ngx_http_sundew_cache_lookup(slcf, ctx, need, family, addr);
 
-    v = ngx_http_sundew_evaluate(ctx->decided, ctx->matched, bl, wl, has_wl);
+    v = ngx_http_sundew_evaluate(ctx->decided, ctx->matched, dmask, amask, has_allow);
 
     if (v != SW_V_UNKNOWN) {
         if (need) {
             sw_stats_inc(SW_STAT_CACHE_HIT);
         }
 
-        return ngx_http_sundew_apply(r, slcf, ctx, v, bl, wl);
+        return ngx_http_sundew_apply(r, slcf, ctx, v, dmask, amask);
     }
 
     sw_stats_inc(SW_STAT_CACHE_MISS);
@@ -556,7 +572,7 @@ ngx_http_sundew_handler(ngx_http_request_t *r)
                          slcf->lookup_timeout)
         != NGX_OK)
     {
-        return ngx_http_sundew_finish(r, slcf, ctx, bl, wl);
+        return ngx_http_sundew_finish(r, slcf, ctx, dmask, amask);
     }
 
     ctx->state = SW_STATE_PENDING;
@@ -800,14 +816,14 @@ ngx_http_sundew_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_http_sundew_loc_conf_t *prev = parent;
     ngx_http_sundew_loc_conf_t *conf = child;
 
-    if (!conf->blacklist_set) {
-        conf->blacklist = prev->blacklist;
-        conf->blacklist_set = prev->blacklist_set;
+    if (!conf->deny_set) {
+        conf->deny = prev->deny;
+        conf->deny_set = prev->deny_set;
     }
 
-    if (!conf->whitelist_set) {
-        conf->whitelist = prev->whitelist;
-        conf->whitelist_set = prev->whitelist_set;
+    if (!conf->allow_set) {
+        conf->allow = prev->allow;
+        conf->allow_set = prev->allow_set;
     }
 
     ngx_conf_merge_uint_value(conf->status, prev->status, NGX_HTTP_FORBIDDEN);
@@ -831,12 +847,12 @@ ngx_http_sundew_sets(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_uint_t   i, *seen;
 
     if (cmd->offset) {
-        mask = &slcf->whitelist;
-        seen = &slcf->whitelist_set;
+        mask = &slcf->allow;
+        seen = &slcf->allow_set;
 
     } else {
-        mask = &slcf->blacklist;
-        seen = &slcf->blacklist_set;
+        mask = &slcf->deny;
+        seen = &slcf->deny_set;
     }
 
     if (*seen) {
