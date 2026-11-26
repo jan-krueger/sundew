@@ -17,6 +17,26 @@ const char  *sw_stat_names[SW_STAT_N] = {
 };
 
 
+const char  *sw_stat_help[SW_STAT_N] = {
+    "Requests checked.",
+    "Requests let through.",
+    "Requests denied.",
+    "Requests that would have been denied, under ipset_dryrun.",
+    "Requests let through because no answer was available.",
+    "Requests denied because no answer was available.",
+    "Requests decided by an expired cached answer while no answer was available.",
+    "Requests answered from the cache.",
+    "Requests that needed the helper.",
+    "Questions sent to the helper.",
+    "Requests that joined a question already on its way.",
+    "Questions not answered within sundew_lookup_timeout.",
+    "Questions the helper answered with an error.",
+    "Questions that could not be sent because the helper is gone.",
+    "Questions not sent because too many were in flight.",
+    "Answers that arrived after their timeout and were still cached."
+};
+
+
 ngx_int_t
 sw_stats_zone_init(ngx_shm_zone_t *zone, void *data)
 {

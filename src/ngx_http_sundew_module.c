@@ -611,7 +611,7 @@ ngx_http_sundew_endpoint_send(ngx_http_request_t *r, ngx_uint_t metrics)
         return NGX_HTTP_SERVICE_UNAVAILABLE;
     }
 
-    len = 512 + SW_STAT_N * 128 + SW_STATS_SETS * (SW_SETNAME_LEN + 96);
+    len = 512 + SW_STAT_N * 256 + SW_STATS_SETS * (SW_SETNAME_LEN + 96);
 
     b = ngx_create_temp_buf(r->pool, len);
     if (b == NULL) {
@@ -626,8 +626,10 @@ ngx_http_sundew_endpoint_send(ngx_http_request_t *r, ngx_uint_t metrics)
                            "sundew_info{version=\"%s\"} 1\n", SUNDEW_VERSION);
 
         for (i = 0; i < SW_STAT_N; i++) {
-            p = ngx_sprintf(p, "# TYPE sundew_%s_total counter\n"
+            p = ngx_sprintf(p, "# HELP sundew_%s_total %s\n"
+                               "# TYPE sundew_%s_total counter\n"
                                "sundew_%s_total %uA\n",
+                            sw_stat_names[i], sw_stat_help[i],
                             sw_stat_names[i], sw_stat_names[i], st->c[i]);
         }
 

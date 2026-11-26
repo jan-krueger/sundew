@@ -47,6 +47,7 @@ typedef struct {
 
 
 extern const char  *sw_stat_names[SW_STAT_N];
+extern const char  *sw_stat_help[SW_STAT_N];
 
 ngx_int_t sw_stats_zone_init(ngx_shm_zone_t *zone, void *data);
 sw_stats_t *sw_stats_get(void);
