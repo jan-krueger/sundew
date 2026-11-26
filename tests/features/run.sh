@@ -133,6 +133,7 @@ m=$(curl -s -D - http://127.0.0.1:8080/metrics | tr -d '\r')
 check "metrics content type" grep -q '^Content-Type: text/plain; version=0.0.4' <<<"$m"
 check "metrics: set counter" grep -qE '^sundew_set_matched_total\{set="sw_bad4"\} [0-9]+$' <<<"$m"
 check "metrics: denied counter" grep -qE '^sundew_denied_total [0-9]+$' <<<"$m"
+check "metrics: every counter has HELP" [ "$(grep -c '^# HELP sundew_' <<<"$m")" = "$(grep -c '^# TYPE sundew_' <<<"$m")" ]
 check "metrics: every sample line is well formed" bash -c "! grep -vE '^(# (HELP|TYPE) .*|[a-z_]+(\{[a-z_]+=\"[^\"]*\"\})? [0-9]+)$' <<<\"\$1\" | grep -v '^Content\|^HTTP\|^Server\|^Date\|^Connection\|^X-Sundew\|^$' | grep -q ." _ "$m"
 
 stop_all
