@@ -8,7 +8,9 @@
 #include <ngx_http.h>
 
 #include "ngx_sundew.h"
+#include "sw_cache.h"
 #include "sw_client.h"
+#include "sw_stats.h"
 
 
 #define SW_STATE_NEW        0
@@ -20,14 +22,25 @@
 #define SW_RES_DENY         2
 #define SW_RES_DRYRUN       3
 
+#define SW_V_UNKNOWN        0
+#define SW_V_ALLOW          1
+#define SW_V_ALLOW_WL       2
+#define SW_V_DENY_BL        3
+#define SW_V_DENY_NOT_WL    4
+
+#define SW_STALE_MS         (600 * 1000)
+
 
 typedef struct {
     uint64_t     blacklist;
+    uint64_t     whitelist;
     ngx_uint_t   blacklist_set;
+    ngx_uint_t   whitelist_set;
     ngx_uint_t   status;
     ngx_flag_t   fail_open;
     ngx_flag_t   dryrun;
     ngx_msec_t   lookup_timeout;
+    time_t       cache_ttl;
 } ngx_http_sundew_loc_conf_t;
 
 
@@ -37,6 +50,10 @@ typedef struct {
     ngx_uint_t            state;
     ngx_uint_t            result;
     ngx_int_t             matched_set;      /* index or -1 */
+    uint64_t              asked;
+    uint64_t              decided;
+    uint64_t              matched;
+    uint64_t              stale_in;
 } ngx_http_sundew_ctx_t;
 
 
@@ -45,9 +62,11 @@ static ngx_int_t ngx_http_sundew_init(ngx_conf_t *cf);
 static void *ngx_http_sundew_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_sundew_merge_loc_conf(ngx_conf_t *cf, void *parent,
     void *child);
-static char *ngx_http_sundew_blacklist(ngx_conf_t *cf, ngx_command_t *cmd,
+static char *ngx_http_sundew_sets(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_sundew_status(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static char *ngx_http_sundew_endpoint(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 
 
@@ -55,16 +74,23 @@ static ngx_command_t  ngx_http_sundew_commands[] = {
 
     { ngx_string("ipset_blacklist"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
-      ngx_http_sundew_blacklist,
+      ngx_http_sundew_sets,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
+      NULL },
+
+    { ngx_string("ipset_whitelist"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
+      ngx_http_sundew_sets,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      1,
       NULL },
 
     { ngx_string("ipset_status"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
       ngx_http_sundew_status,
       NGX_HTTP_LOC_CONF_OFFSET,
-      offsetof(ngx_http_sundew_loc_conf_t, status),
+      0,
       NULL },
 
     { ngx_string("ipset_fail_open"),
@@ -81,11 +107,32 @@ static ngx_command_t  ngx_http_sundew_commands[] = {
       offsetof(ngx_http_sundew_loc_conf_t, dryrun),
       NULL },
 
+    { ngx_string("ipset_cache_ttl"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_sec_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_sundew_loc_conf_t, cache_ttl),
+      NULL },
+
     { ngx_string("sundew_lookup_timeout"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
       ngx_conf_set_msec_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_sundew_loc_conf_t, lookup_timeout),
+      NULL },
+
+    { ngx_string("ipset_stats"),
+      NGX_HTTP_LOC_CONF|NGX_CONF_NOARGS,
+      ngx_http_sundew_endpoint,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    { ngx_string("ipset_metrics"),
+      NGX_HTTP_LOC_CONF|NGX_CONF_NOARGS,
+      ngx_http_sundew_endpoint,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      1,
       NULL },
 
       ngx_null_command
@@ -181,6 +228,26 @@ ngx_http_sundew_client_addr(ngx_http_request_t *r, ngx_uint_t *family,
 }
 
 
+static ngx_uint_t
+ngx_http_sundew_evaluate(uint64_t decided, uint64_t matched, uint64_t bl,
+    uint64_t wl, ngx_uint_t has_wl)
+{
+    if (has_wl) {
+        if (matched & wl) {
+            return SW_V_ALLOW_WL;
+        }
+
+        return ((decided & wl) == wl) ? SW_V_DENY_NOT_WL : SW_V_UNKNOWN;
+    }
+
+    if (matched & bl) {
+        return SW_V_DENY_BL;
+    }
+
+    return ((decided & bl) == bl) ? SW_V_ALLOW : SW_V_UNKNOWN;
+}
+
+
 static ngx_int_t
 ngx_http_sundew_deny(ngx_http_request_t *r, ngx_http_sundew_loc_conf_t *slcf,
     ngx_http_sundew_ctx_t *ctx, const char *why)
@@ -201,6 +268,7 @@ ngx_http_sundew_deny(ngx_http_request_t *r, ngx_http_sundew_loc_conf_t *slcf,
         ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0,
                       "sundew: dryrun, would deny %V (%s, set %V)",
                       &r->connection->addr_text, why, name);
+        sw_stats_inc(SW_STAT_DRYRUN);
         ctx->result = SW_RES_DRYRUN;
         return NGX_DECLINED;
     }
@@ -209,9 +277,43 @@ ngx_http_sundew_deny(ngx_http_request_t *r, ngx_http_sundew_loc_conf_t *slcf,
                   "sundew: deny %V (%s, set %V)",
                   &r->connection->addr_text, why, name);
 
+    sw_stats_inc(SW_STAT_DENIED);
     ctx->result = SW_RES_DENY;
 
     return slcf->status;
+}
+
+
+static ngx_int_t
+ngx_http_sundew_apply(ngx_http_request_t *r, ngx_http_sundew_loc_conf_t *slcf,
+    ngx_http_sundew_ctx_t *ctx, ngx_uint_t v, uint64_t bl, uint64_t wl)
+{
+    uint64_t  hit;
+
+    ctx->state = SW_STATE_DONE;
+
+    switch (v) {
+
+    case SW_V_DENY_BL:
+        hit = ctx->matched & bl;
+        ctx->matched_set = (ngx_int_t) __builtin_ctzll(hit);
+        sw_stats_set_matched(ctx->matched_set);
+        return ngx_http_sundew_deny(r, slcf, ctx, "blacklisted");
+
+    case SW_V_DENY_NOT_WL:
+        return ngx_http_sundew_deny(r, slcf, ctx, "not whitelisted");
+
+    case SW_V_ALLOW_WL:
+        hit = ctx->matched & wl;
+        ctx->matched_set = (ngx_int_t) __builtin_ctzll(hit);
+        sw_stats_set_matched(ctx->matched_set);
+        /* fall through */
+
+    default:
+        sw_stats_inc(SW_STAT_ALLOWED);
+        ctx->result = SW_RES_ALLOW;
+        return NGX_DECLINED;
+    }
 }
 
 
@@ -222,46 +324,111 @@ ngx_http_sundew_fail(ngx_http_request_t *r, ngx_http_sundew_loc_conf_t *slcf,
     static const char *why[] = { "ok", "helper error", "lookup timeout",
                                  "helper down", "busy" };
 
+    ctx->state = SW_STATE_DONE;
+
     if (slcf->fail_open) {
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "sundew: allow %V (fail open: %s)",
                       &r->connection->addr_text, why[result]);
+        sw_stats_inc(SW_STAT_FAIL_OPEN);
+        sw_stats_inc(SW_STAT_ALLOWED);
         ctx->result = SW_RES_ALLOW;
         return NGX_DECLINED;
     }
+
+    sw_stats_inc(SW_STAT_FAIL_CLOSED);
 
     return ngx_http_sundew_deny(r, slcf, ctx, why[result]);
 }
 
 
+/* verdict after the helper answered, timed out or failed */
+
 static ngx_int_t
-ngx_http_sundew_verdict(ngx_http_request_t *r,
-    ngx_http_sundew_loc_conf_t *slcf, ngx_http_sundew_ctx_t *ctx,
-    uint64_t mask)
+ngx_http_sundew_finish(ngx_http_request_t *r, ngx_http_sundew_loc_conf_t *slcf,
+    ngx_http_sundew_ctx_t *ctx, uint64_t bl, uint64_t wl)
 {
-    uint64_t      hit;
+    ngx_uint_t    v, has_wl, result;
     sw_waiter_t  *w;
 
     w = &ctx->waiter;
+    has_wl = (slcf->whitelist != 0);
+    result = w->result;
 
-    if (w->result != SW_RESULT_OK) {
-        return ngx_http_sundew_fail(r, slcf, ctx, w->result);
+    if (result == SW_RESULT_OK) {
+        ctx->decided |= w->decided & ctx->asked;
+        ctx->matched |= w->matched & w->decided & ctx->asked;
     }
 
-    hit = w->matched & mask;
+    v = ngx_http_sundew_evaluate(ctx->decided, ctx->matched, bl, wl, has_wl);
 
-    if (hit) {
-        ctx->matched_set = (ngx_int_t) __builtin_ctzll(hit);
-        return ngx_http_sundew_deny(r, slcf, ctx, "blacklisted");
+    if (v != SW_V_UNKNOWN) {
+        return ngx_http_sundew_apply(r, slcf, ctx, v, bl, wl);
     }
 
-    if ((w->decided & mask) != mask) {
-        return ngx_http_sundew_fail(r, slcf, ctx, SW_RESULT_ERROR);
+    if (ctx->stale_in) {
+        ctx->decided |= ctx->stale_in;
+        ctx->matched |= ctx->stale_in;
+
+        v = ngx_http_sundew_evaluate(ctx->decided, ctx->matched, bl, wl,
+                                     has_wl);
+
+        if (v != SW_V_UNKNOWN) {
+            sw_stats_inc(SW_STAT_STALE_SERVED);
+            return ngx_http_sundew_apply(r, slcf, ctx, v, bl, wl);
+        }
     }
 
-    ctx->result = SW_RES_ALLOW;
+    return ngx_http_sundew_fail(r, slcf, ctx,
+                                result == SW_RESULT_OK ? SW_RESULT_ERROR
+                                                       : result);
+}
 
-    return NGX_DECLINED;
+
+static void
+ngx_http_sundew_cache_lookup(ngx_http_sundew_loc_conf_t *slcf,
+    ngx_http_sundew_ctx_t *ctx, uint64_t need, ngx_uint_t family,
+    u_char *addr)
+{
+    u_char                   key[16];
+    uint64_t                 bit;
+    ngx_msec_t               age, ttl;
+    ngx_uint_t               i, verdict;
+    ngx_sundew_set_t        *set;
+    ngx_sundew_core_conf_t  *scf;
+
+    scf = ngx_http_sundew_core_conf();
+
+    if (scf->cache_zone == NULL || scf->cache_zone->data == NULL) {
+        return;
+    }
+
+    sw_cache_addr(key, family, addr);
+    set = scf->sets.elts;
+    ttl = (ngx_msec_t) slcf->cache_ttl * 1000;
+
+    for (i = 0; i < scf->sets.nelts; i++) {
+        bit = (uint64_t) 1 << i;
+
+        if (!(need & bit)
+            || sw_cache_get(scf->cache_zone, set[i].ident, key, &verdict,
+                            &age)
+               != NGX_OK)
+        {
+            continue;
+        }
+
+        if (age < ttl) {
+            ctx->decided |= bit;
+
+            if (verdict == SW_VERDICT_IN) {
+                ctx->matched |= bit;
+            }
+
+        } else if (verdict == SW_VERDICT_IN && age < ttl + SW_STALE_MS) {
+            ctx->stale_in |= bit;
+        }
+    }
 }
 
 
@@ -294,8 +461,8 @@ static ngx_int_t
 ngx_http_sundew_handler(ngx_http_request_t *r)
 {
     u_char                       addr[16];
-    uint64_t                     mask;
-    ngx_uint_t                   family;
+    uint64_t                     famask, bl, wl, need, ask;
+    ngx_uint_t                   family, v, has_wl;
     ngx_pool_cleanup_t          *cln;
     ngx_http_sundew_ctx_t       *ctx;
     ngx_sundew_core_conf_t      *scf;
@@ -307,17 +474,19 @@ ngx_http_sundew_handler(ngx_http_request_t *r)
 
     slcf = ngx_http_get_module_loc_conf(r, ngx_http_sundew_module);
 
-    if (slcf->blacklist == 0) {
+    if (slcf->blacklist == 0 && slcf->whitelist == 0) {
         return NGX_DECLINED;
     }
-
-    scf = ngx_http_sundew_core_conf();
 
     if (ngx_http_sundew_client_addr(r, &family, addr) != NGX_OK) {
         return NGX_DECLINED;
     }
 
-    mask = slcf->blacklist & (family == 4 ? scf->mask4 : scf->mask6);
+    scf = ngx_http_sundew_core_conf();
+    famask = (family == 4) ? scf->mask4 : scf->mask6;
+    bl = slcf->blacklist & famask;
+    wl = slcf->whitelist & famask;
+    has_wl = (slcf->whitelist != 0);
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_sundew_module);
 
@@ -328,9 +497,14 @@ ngx_http_sundew_handler(ngx_http_request_t *r)
             return NGX_AGAIN;
 
         case SW_STATE_DONE:
+            if (ctx->result != SW_RES_NONE) {
+                return (ctx->result == SW_RES_DENY) ? (ngx_int_t) slcf->status
+                                                    : NGX_DECLINED;
+            }
+
             r->write_event_handler = ngx_http_request_empty_handler;
             r->read_event_handler = ngx_http_block_reading;
-            return ngx_http_sundew_verdict(r, slcf, ctx, mask);
+            return ngx_http_sundew_finish(r, slcf, ctx, bl, wl);
 
         default:
             return NGX_DECLINED;
@@ -349,11 +523,26 @@ ngx_http_sundew_handler(ngx_http_request_t *r)
 
     ngx_http_set_ctx(r, ctx, ngx_http_sundew_module);
 
-    if (mask == 0) {
-        ctx->state = SW_STATE_DONE;
-        ctx->result = SW_RES_ALLOW;
-        return NGX_DECLINED;
+    sw_stats_inc(SW_STAT_CHECKED);
+
+    need = has_wl ? wl : bl;
+
+    ngx_http_sundew_cache_lookup(slcf, ctx, need, family, addr);
+
+    v = ngx_http_sundew_evaluate(ctx->decided, ctx->matched, bl, wl, has_wl);
+
+    if (v != SW_V_UNKNOWN) {
+        if (need) {
+            sw_stats_inc(SW_STAT_CACHE_HIT);
+        }
+
+        return ngx_http_sundew_apply(r, slcf, ctx, v, bl, wl);
     }
+
+    sw_stats_inc(SW_STAT_CACHE_MISS);
+
+    ask = need & ~ctx->decided;
+    ctx->asked = ask;
 
     cln = ngx_pool_cleanup_add(r->pool, 0);
     if (cln == NULL) {
@@ -363,12 +552,11 @@ ngx_http_sundew_handler(ngx_http_request_t *r)
     cln->handler = ngx_http_sundew_cleanup;
     cln->data = ctx;
 
-    if (sw_client_submit(&ctx->waiter, mask, family, addr,
+    if (sw_client_submit(&ctx->waiter, ask, family, addr,
                          slcf->lookup_timeout)
         != NGX_OK)
     {
-        ctx->state = SW_STATE_DONE;
-        return ngx_http_sundew_fail(r, slcf, ctx, ctx->waiter.result);
+        return ngx_http_sundew_finish(r, slcf, ctx, bl, wl);
     }
 
     ctx->state = SW_STATE_PENDING;
@@ -379,6 +567,140 @@ ngx_http_sundew_handler(ngx_http_request_t *r)
     return NGX_AGAIN;
 }
 
+
+/* ---- ipset_stats / ipset_metrics ---------------------------------------- */
+
+static ngx_int_t
+ngx_http_sundew_endpoint_send(ngx_http_request_t *r, ngx_uint_t metrics)
+{
+    size_t        len;
+    u_char       *p;
+    ngx_int_t     rc;
+    ngx_buf_t    *b;
+    ngx_uint_t    i, first;
+    sw_stats_t   *st;
+    ngx_chain_t   out;
+
+    if (!(r->method & (NGX_HTTP_GET|NGX_HTTP_HEAD))) {
+        return NGX_HTTP_NOT_ALLOWED;
+    }
+
+    rc = ngx_http_discard_request_body(r);
+    if (rc != NGX_OK) {
+        return rc;
+    }
+
+    st = sw_stats_get();
+    if (st == NULL) {
+        return NGX_HTTP_SERVICE_UNAVAILABLE;
+    }
+
+    len = 512 + SW_STAT_N * 128 + SW_STATS_SETS * (SW_SETNAME_LEN + 96);
+
+    b = ngx_create_temp_buf(r->pool, len);
+    if (b == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    p = b->last;
+
+    if (metrics) {
+        p = ngx_sprintf(p, "# HELP sundew_info Sundew build.\n"
+                           "# TYPE sundew_info gauge\n"
+                           "sundew_info{version=\"%s\"} 1\n", SUNDEW_VERSION);
+
+        for (i = 0; i < SW_STAT_N; i++) {
+            p = ngx_sprintf(p, "# TYPE sundew_%s_total counter\n"
+                               "sundew_%s_total %uA\n",
+                            sw_stat_names[i], sw_stat_names[i], st->c[i]);
+        }
+
+        p = ngx_sprintf(p, "# HELP sundew_set_matched_total Requests decided "
+                           "by a match in this set.\n"
+                           "# TYPE sundew_set_matched_total counter\n");
+
+        for (i = 0; i < SW_STATS_SETS; i++) {
+            if (st->sets[i].name[0]) {
+                p = ngx_sprintf(p, "sundew_set_matched_total{set=\"%s\"} %uA\n",
+                                st->sets[i].name, st->sets[i].matched);
+            }
+        }
+
+        ngx_str_set(&r->headers_out.content_type,
+                    "text/plain; version=0.0.4; charset=utf-8");
+
+    } else {
+        p = ngx_sprintf(p, "{\"version\":\"%s\",\"counters\":{",
+                        SUNDEW_VERSION);
+
+        for (i = 0; i < SW_STAT_N; i++) {
+            p = ngx_sprintf(p, "%s\"%s\":%uA", i ? "," : "",
+                            sw_stat_names[i], st->c[i]);
+        }
+
+        p = ngx_sprintf(p, "},\"sets\":{");
+
+        for (i = 0, first = 1; i < SW_STATS_SETS; i++) {
+            if (st->sets[i].name[0]) {
+                p = ngx_sprintf(p, "%s\"%s\":{\"matched\":%uA}",
+                                first ? "" : ",", st->sets[i].name,
+                                st->sets[i].matched);
+                first = 0;
+            }
+        }
+
+        p = ngx_sprintf(p, "}}\n");
+
+        ngx_str_set(&r->headers_out.content_type, "application/json");
+    }
+
+    b->last = p;
+    b->last_buf = (r == r->main);
+    b->last_in_chain = 1;
+
+    r->headers_out.status = NGX_HTTP_OK;
+    r->headers_out.content_length_n = b->last - b->pos;
+
+    rc = ngx_http_send_header(r);
+    if (rc == NGX_ERROR || rc > NGX_OK || r->header_only) {
+        return rc;
+    }
+
+    out.buf = b;
+    out.next = NULL;
+
+    return ngx_http_output_filter(r, &out);
+}
+
+
+static ngx_int_t
+ngx_http_sundew_stats_handler(ngx_http_request_t *r)
+{
+    return ngx_http_sundew_endpoint_send(r, 0);
+}
+
+
+static ngx_int_t
+ngx_http_sundew_metrics_handler(ngx_http_request_t *r)
+{
+    return ngx_http_sundew_endpoint_send(r, 1);
+}
+
+
+static char *
+ngx_http_sundew_endpoint(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_core_loc_conf_t  *clcf;
+
+    clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
+    clcf->handler = cmd->offset ? ngx_http_sundew_metrics_handler
+                                : ngx_http_sundew_stats_handler;
+
+    return NGX_CONF_OK;
+}
+
+
+/* ---- variables ---------------------------------------------------------- */
 
 static ngx_int_t
 ngx_http_sundew_result_variable(ngx_http_request_t *r,
@@ -450,6 +772,8 @@ ngx_http_sundew_add_variables(ngx_conf_t *cf)
 }
 
 
+/* ---- configuration ------------------------------------------------------ */
+
 static void *
 ngx_http_sundew_create_loc_conf(ngx_conf_t *cf)
 {
@@ -464,6 +788,7 @@ ngx_http_sundew_create_loc_conf(ngx_conf_t *cf)
     conf->fail_open = NGX_CONF_UNSET;
     conf->dryrun = NGX_CONF_UNSET;
     conf->lookup_timeout = NGX_CONF_UNSET_MSEC;
+    conf->cache_ttl = NGX_CONF_UNSET;
 
     return conf;
 }
@@ -480,29 +805,45 @@ ngx_http_sundew_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         conf->blacklist_set = prev->blacklist_set;
     }
 
+    if (!conf->whitelist_set) {
+        conf->whitelist = prev->whitelist;
+        conf->whitelist_set = prev->whitelist_set;
+    }
+
     ngx_conf_merge_uint_value(conf->status, prev->status, NGX_HTTP_FORBIDDEN);
     ngx_conf_merge_value(conf->fail_open, prev->fail_open, 0);
     ngx_conf_merge_value(conf->dryrun, prev->dryrun, 0);
     ngx_conf_merge_msec_value(conf->lookup_timeout, prev->lookup_timeout, 100);
+    ngx_conf_merge_sec_value(conf->cache_ttl, prev->cache_ttl, 60);
 
     return NGX_CONF_OK;
 }
 
 
 static char *
-ngx_http_sundew_blacklist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ngx_http_sundew_sets(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_sundew_loc_conf_t *slcf = conf;
 
-    ngx_int_t   idx;
-    ngx_str_t  *value;
-    ngx_uint_t  i;
+    uint64_t    *mask;
+    ngx_int_t    idx;
+    ngx_str_t   *value;
+    ngx_uint_t   i, *seen;
 
-    if (slcf->blacklist_set) {
+    if (cmd->offset) {
+        mask = &slcf->whitelist;
+        seen = &slcf->whitelist_set;
+
+    } else {
+        mask = &slcf->blacklist;
+        seen = &slcf->blacklist_set;
+    }
+
+    if (*seen) {
         return "is duplicate";
     }
 
-    slcf->blacklist_set = 1;
+    *seen = 1;
     value = cf->args->elts;
 
     if (cf->args->nelts == 2 && ngx_strcmp(value[1].data, "off") == 0) {
@@ -515,7 +856,7 @@ ngx_http_sundew_blacklist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
             return NGX_CONF_ERROR;
         }
 
-        slcf->blacklist |= (uint64_t) 1 << idx;
+        *mask |= (uint64_t) 1 << idx;
     }
 
     return NGX_CONF_OK;

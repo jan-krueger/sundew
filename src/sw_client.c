@@ -9,7 +9,10 @@
 #include <ngx_core.h>
 #include <ngx_event.h>
 
+#include "ngx_sundew.h"
+#include "sw_cache.h"
 #include "sw_client.h"
+#include "sw_stats.h"
 
 
 #define SW_MAX_PENDING      1024        /* power of two */
@@ -132,6 +135,7 @@ sw_client_submit(sw_waiter_t *w, uint64_t mask, ngx_uint_t family,
     sw_pending_t  *p;
 
     if (sw_client == NULL || sw_client->down) {
+        sw_stats_inc(SW_STAT_HELPER_DOWN);
         w->result = SW_RESULT_DOWN;
         return NGX_DECLINED;
     }
@@ -151,11 +155,13 @@ sw_client_submit(sw_waiter_t *w, uint64_t mask, ngx_uint_t family,
         {
             ngx_log_debug1(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
                            "sundew coalesce req_id:%uD", p->req_id);
+            sw_stats_inc(SW_STAT_COALESCED);
             goto join;
         }
     }
 
     if (ngx_queue_empty(&sw_client->free)) {
+        sw_stats_inc(SW_STAT_BUSY);
         w->result = SW_RESULT_BUSY;
         return NGX_DECLINED;
     }
@@ -192,6 +198,7 @@ sw_client_submit(sw_waiter_t *w, uint64_t mask, ngx_uint_t family,
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
                    "sundew submit req_id:%uD", p->req_id);
+    sw_stats_inc(SW_STAT_LOOKUPS);
 
     ngx_queue_remove(&p->link);
     ngx_queue_insert_tail(bucket, &p->link);
@@ -225,11 +232,48 @@ sw_client_cancel(sw_waiter_t *w)
 
 
 static void
+sw_client_store(sw_pending_t *p, uint64_t decided, uint64_t matched)
+{
+    u_char                   addr[16];
+    ngx_uint_t               i;
+    ngx_sundew_set_t        *set;
+    ngx_sundew_core_conf_t  *scf;
+
+    scf = (ngx_sundew_core_conf_t *) ngx_get_conf(ngx_cycle->conf_ctx,
+                                                  ngx_sundew_core_module);
+
+    if (scf->cache_zone == NULL || scf->cache_zone->data == NULL) {
+        return;
+    }
+
+    sw_cache_addr(addr, p->family, p->addr);
+    set = scf->sets.elts;
+
+    for (i = 0; i < scf->sets.nelts; i++) {
+        if (decided & p->mask & ((uint64_t) 1 << i)) {
+            sw_cache_put(scf->cache_zone, set[i].ident, addr,
+                         (matched & ((uint64_t) 1 << i)) ? SW_VERDICT_IN
+                                                         : SW_VERDICT_NOT_IN);
+        }
+    }
+}
+
+
+static void
 sw_client_complete(sw_pending_t *p, ngx_uint_t result, uint64_t decided,
     uint64_t matched)
 {
     ngx_queue_t  *q;
     sw_waiter_t  *w;
+
+    if (result == SW_RESULT_OK) {
+        sw_client_store(p, decided, matched);
+
+    } else {
+        sw_stats_inc(result == SW_RESULT_TIMEOUT ? SW_STAT_TIMEOUTS
+                     : result == SW_RESULT_DOWN ? SW_STAT_HELPER_DOWN
+                     : SW_STAT_HELPER_ERRORS);
+    }
 
     if (p->timer.timer_set) {
         ngx_del_timer(&p->timer);
@@ -338,6 +382,7 @@ sw_client_read_handler(ngx_event_t *rev)
         if (p->req_id != rep.req_id) {
             ngx_log_debug1(NGX_LOG_DEBUG_HTTP, rev->log, 0,
                            "sundew stale reply req_id:%uD", rep.req_id);
+            sw_stats_inc(SW_STAT_LATE_REPLIES);
             continue;
         }
 

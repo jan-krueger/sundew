@@ -12,12 +12,18 @@
 #include "sw_proto.h"
 
 
+#define SUNDEW_VERSION  "0.1.0-dev"
+
+
 typedef struct {
     ngx_str_t                name;
     ngx_uint_t               role;
     /* from READY */
     ngx_uint_t               family;        /* AF_INET / AF_INET6 */
+    ngx_uint_t               revision;
     u_char                   type[SW_SETNAME_LEN];
+    uint64_t                 ident;         /* cache key */
+    ngx_uint_t               stat_slot;
 } ngx_sundew_set_t;
 
 
@@ -27,6 +33,9 @@ typedef struct {
     ngx_msec_t               handshake_timeout;
     time_t                   drain_timeout;
     ngx_msec_t               debug_delay;
+    size_t                   cache_size;
+    ngx_shm_zone_t          *cache_zone;
+    ngx_shm_zone_t          *stats_zone;
 
     ngx_array_t              sets;          /* ngx_sundew_set_t */
 

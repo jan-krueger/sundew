@@ -18,7 +18,9 @@
 #include <sys/wait.h>
 
 #include "ngx_sundew.h"
+#include "sw_cache.h"
 #include "sw_client.h"
+#include "sw_stats.h"
 
 
 #ifndef SYS_pidfd_open
@@ -81,6 +83,9 @@ static ngx_sundew_helper_t  ngx_sundew_helpers[SW_MAX_HELPERS];
 static ngx_uint_t           ngx_sundew_nhelpers;
 static ngx_uint_t           ngx_sundew_generation;
 
+static ngx_str_t  sw_cache_zone_name = ngx_string("sundew_cache");
+static ngx_str_t  sw_stats_zone_name = ngx_string("sundew_stats");
+
 
 static ngx_command_t  ngx_sundew_core_commands[] = {
 
@@ -110,6 +115,13 @@ static ngx_command_t  ngx_sundew_core_commands[] = {
       ngx_conf_set_sec_slot,
       0,
       offsetof(ngx_sundew_core_conf_t, drain_timeout),
+      NULL },
+
+    { ngx_string("sundew_cache_size"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_size_slot,
+      0,
+      offsetof(ngx_sundew_core_conf_t, cache_size),
       NULL },
 
 #if (NGX_DEBUG)
@@ -161,6 +173,7 @@ ngx_sundew_core_create_conf(ngx_cycle_t *cycle)
     scf->handshake_timeout = NGX_CONF_UNSET_MSEC;
     scf->drain_timeout = NGX_CONF_UNSET;
     scf->debug_delay = NGX_CONF_UNSET_MSEC;
+    scf->cache_size = NGX_CONF_UNSET_SIZE;
 
     if (ngx_array_init(&scf->sets, cycle->pool, 4, sizeof(ngx_sundew_set_t))
         != NGX_OK)
@@ -211,6 +224,23 @@ ngx_sundew_add_set(ngx_conf_t *cf, ngx_str_t *name, ngx_uint_t role)
         }
     }
 
+    if (scf->cache_zone == NULL) {
+        scf->cache_zone = ngx_shared_memory_add(cf, &sw_cache_zone_name, 0,
+                                                &ngx_sundew_core_module);
+        scf->stats_zone = ngx_shared_memory_add(cf, &sw_stats_zone_name,
+                                                64 * 1024,
+                                                &ngx_sundew_core_module);
+
+        if (scf->cache_zone == NULL || scf->stats_zone == NULL) {
+            return NGX_ERROR;
+        }
+
+        scf->cache_zone->init = sw_cache_zone_init;
+        scf->cache_zone->data = scf;
+        scf->stats_zone->init = sw_stats_zone_init;
+        scf->stats_zone->data = scf;
+    }
+
     if (scf->sets.nelts >= SW_MAX_SETS) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                            "too many sets (max %d)", SW_MAX_SETS);
@@ -240,6 +270,17 @@ ngx_sundew_core_init_conf(ngx_cycle_t *cycle, void *conf)
     ngx_conf_init_msec_value(scf->handshake_timeout, 5000);
     ngx_conf_init_value(scf->drain_timeout, 3600);
     ngx_conf_init_msec_value(scf->debug_delay, 0);
+    ngx_conf_init_size_value(scf->cache_size, 16 * 1024 * 1024);
+
+    if (scf->cache_size < 1024 * 1024) {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "\"sundew_cache_size\" must be at least 1m");
+        return NGX_CONF_ERROR;
+    }
+
+    if (scf->cache_zone) {
+        scf->cache_zone->shm.size = scf->cache_size;
+    }
 
     if (scf->helper_user.len == 0) {
         ngx_str_set(&scf->helper_user, "sundew");
@@ -900,6 +941,7 @@ ngx_sundew_handshake(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf, int ctl)
         }
 
         set[i].family = rs[i].family;
+        set[i].revision = rs[i].revision;
 
         if (set[i].family == AF_INET6) {
             scf->mask6 |= (uint64_t) 1 << i;
