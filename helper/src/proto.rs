@@ -45,6 +45,7 @@ pub const LOG_NETLINK: u64 = 3;
 pub const LOG_VIOLATION: u64 = 4;
 pub const LOG_ENGINE_EXIT: u64 = 5;
 pub const LOG_LANDLOCK: u64 = 6;
+pub const LOG_GAVE_UP: u64 = 7;
 
 pub const VIOLATION_SIZE: u64 = 1;
 pub const VIOLATION_FRAME: u64 = 2;

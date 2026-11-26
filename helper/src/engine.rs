@@ -55,25 +55,25 @@ impl Engine {
         let mut left = msgs.len();
         while left > 0 {
             if !sys::poll_in(self.nl, NL_TIMEOUT_MS).map_err(errno)? {
-                eprintln!("sundew-helper: netlink timeout");
+                log!("netlink timeout");
                 return Err(libc::ETIMEDOUT);
             }
             let (n, flags) = match sys::recv(self.nl, &mut self.rbuf) {
                 Ok(x) => x,
                 Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => continue,
                 Err(e) => {
-                    eprintln!("sundew-helper: netlink recv: {e}");
+                    log!("netlink recv: {e}");
                     return Err(errno(e));
                 }
             };
             if flags & libc::MSG_TRUNC != 0 || n > self.rbuf.len() {
-                eprintln!("sundew-helper: netlink reply truncated");
+                log!("netlink reply truncated");
                 return Err(libc::EMSGSIZE);
             }
             let replies = match nl::parse(&self.rbuf[..n]) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("sundew-helper: netlink parse: {e}");
+                    log!("netlink parse: {e}");
                     return Err(libc::EPROTO);
                 }
             };
@@ -274,8 +274,8 @@ fn harden() -> Option<i32> {
 
     let landlock = sys::landlock_deny_all();
     match &landlock {
-        Ok(abi) => eprintln!("sundew-helper: landlock enforced (abi {abi})"),
-        Err(e) => eprintln!("sundew-helper: landlock unavailable: {e}"),
+        Ok(abi) => log!("landlock enforced (abi {abi})"),
+        Err(e) => log!("landlock unavailable: {e}"),
     }
 
     if let Err(e) = sys::seccomp_allowlist(&allow, &[libc::SYS_clone3]) {
@@ -310,8 +310,8 @@ pub fn run(restarted: bool) -> ! {
     }
     verify(&policy, last_cap, false);
 
-    eprintln!(
-        "sundew-helper: engine up (generation {}, restarted={restarted})",
+    log!(
+        "engine up (generation {}, restarted={restarted})",
         policy.generation
     );
 
@@ -360,12 +360,8 @@ pub fn run(restarted: bool) -> ! {
     }
 
     if let Some(errno) = harden() {
-        eng.log(
-            proto::FD_SLOT0,
-            proto::LVL_NOTICE,
-            proto::LOG_LANDLOCK,
-            errno as u64,
-        );
+        let log = proto::encode_log(proto::LVL_NOTICE, proto::LOG_LANDLOCK, errno as u64);
+        sys::send_first(proto::FD_SLOT0, policy.nslots as i32, &log);
     }
 
     if policy.debug_delay_ms != 0 && !cfg!(feature = "test-delay") {
@@ -426,7 +422,7 @@ pub fn run(restarted: bool) -> ! {
                         match proto::decode_drain(&fbuf[..len.min(fbuf.len())]) {
                             Ok(0) => sys::exit(0),
                             Ok(s) => deadline = Some(sys::monotonic_ms() + s as u64 * 1000),
-                            Err(e) => eprintln!("sundew-helper: bad ctl frame: {e}"),
+                            Err(e) => log!("bad ctl frame: {e}"),
                         }
                     }
                     _ => {}
@@ -468,7 +464,7 @@ pub fn run(restarted: bool) -> ! {
 
                 if let Some(reason) = close_slot {
                     if let Some(reason) = reason {
-                        eprintln!("sundew-helper: protocol violation on fd {fd} ({reason})");
+                        log!("protocol violation on fd {fd} ({reason})");
                         let _ = sys::send(
                             fd,
                             &proto::encode_log(proto::LVL_ALERT, proto::LOG_VIOLATION, reason),

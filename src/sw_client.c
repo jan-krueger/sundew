@@ -528,6 +528,13 @@ sw_client_log(ngx_log_t *log, sw_rep_t *rep)
 
         break;
 
+    case SW_LOG_GAVE_UP:
+        ngx_log_error(level, log, 0,
+                      "sundew: helper engine crashed %uL times in a row; the "
+                      "helper stopped, lookups follow the fail policy until "
+                      "the next reload", rep->matched);
+        break;
+
     case SW_LOG_LANDLOCK:
         ngx_log_error(level, log, (ngx_err_t) rep->matched,
                       "sundew: Landlock is unavailable, the helper runs with "

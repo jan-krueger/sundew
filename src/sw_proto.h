@@ -107,6 +107,7 @@ typedef struct {
 #define SW_LOG_VIOLATION        4       /* reason: 1 size, 2 frame, 3 set mask */
 #define SW_LOG_ENGINE_EXIT      5       /* wait status */
 #define SW_LOG_LANDLOCK         6       /* errno */
+#define SW_LOG_GAVE_UP          7       /* crashes */
 
 typedef struct {
     uint16_t  magic;

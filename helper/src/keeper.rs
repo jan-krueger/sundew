@@ -4,10 +4,14 @@ use crate::proto::{self, Policy};
 use crate::sys::{self, CAP_NET_ADMIN, CAP_SETPCAP, CapSets, bit};
 use std::time::Duration;
 
+/// Consecutive crashes, each within a minute of the last start, before the
+/// keeper stops restarting the engine.
+const MAX_QUICK_CRASHES: u32 = 6;
+
 pub fn fail(status: u16, what: &str, err: Option<std::io::Error>) -> ! {
     match err {
-        Some(e) => eprintln!("sundew-helper: {what}: {e}"),
-        None => eprintln!("sundew-helper: {what}"),
+        Some(e) => log!("{what}: {e}"),
+        None => log!("{what}"),
     }
     let _ = sys::send(proto::FD_CTL, &proto::encode_ready(status, 0, 0, &[]));
     sys::exit(2);
@@ -186,9 +190,16 @@ pub fn verify(p: &Policy, last_cap: u32, keeper: bool) {
         && rgid == p.helper_gid;
 
     if !ok {
-        eprintln!(
-            "sundew-helper: credential check failed: eff={:x} prm={:x} inh={:x} bnd={:x} amb={:x} nnp={} uid={} gid={}",
-            c.effective, c.permitted, c.inheritable, bnd, amb, nnp, ruid, rgid
+        log!(
+            "credential check failed: eff={:x} prm={:x} inh={:x} bnd={:x} amb={:x} nnp={} uid={} gid={}",
+            c.effective,
+            c.permitted,
+            c.inheritable,
+            bnd,
+            amb,
+            nnp,
+            ruid,
+            rgid
         );
         fail(proto::ERR_CAPS, "credential check failed", None);
     }
@@ -210,6 +221,7 @@ pub fn run() -> ! {
 
     let mut restarted = false;
     let mut backoff = Duration::from_millis(100);
+    let mut crashes = 0u32;
 
     loop {
         let started = sys::monotonic_ms();
@@ -222,7 +234,7 @@ pub fn run() -> ! {
                 &[c"sundew-helper", c"--engine"]
             };
             let err = sys::execveat_self(exe_fd, args);
-            eprintln!("sundew-helper: execveat engine: {err}");
+            log!("execveat engine: {err}");
             sys::exit(127);
         }
 
@@ -232,30 +244,43 @@ pub fn run() -> ! {
             && (libc::WEXITSTATUS(st) == 0 || (libc::WEXITSTATUS(st) == 2 && !restarted)))
         {
             let log = proto::encode_log(proto::LVL_ERR, proto::LOG_ENGINE_EXIT, st as u32 as u64);
-            let _ = sys::send(proto::FD_SLOT0, &log);
+            sys::send_first(proto::FD_SLOT0, policy.nslots as i32, &log);
         }
 
         if libc::WIFEXITED(st) {
             match libc::WEXITSTATUS(st) {
                 0 => sys::exit(0),
                 2 if !restarted => sys::exit(1),
-                code => eprintln!("sundew-helper: engine exited with status {code}, restarting"),
+                code => log!("engine exited with status {code}, restarting"),
             }
         } else if libc::WIFSIGNALED(st) {
             let sig = libc::WTERMSIG(st);
             if sig == libc::SIGSYS {
-                eprintln!("sundew-helper: engine killed by seccomp (SIGSYS), restarting");
+                log!("engine killed by seccomp (SIGSYS), restarting");
             } else {
-                eprintln!("sundew-helper: engine killed by signal {sig}, restarting");
+                log!("engine killed by signal {sig}, restarting");
             }
         }
 
         if sys::monotonic_ms().saturating_sub(started) > 60_000 {
             backoff = Duration::from_millis(100);
+            crashes = 0;
+        }
+
+        crashes += 1;
+        if crashes >= MAX_QUICK_CRASHES {
+            log!("engine crashed {crashes} times in a row, giving up");
+            let log = proto::encode_log(proto::LVL_ALERT, proto::LOG_GAVE_UP, crashes as u64);
+            sys::send_first(proto::FD_SLOT0, policy.nslots as i32, &log);
+            sys::exit(1);
         }
 
         std::thread::sleep(backoff);
         backoff = (backoff * 2).min(Duration::from_secs(30));
         restarted = true;
+
+        if sys::all_hung_up(proto::FD_SLOT0, policy.nslots as i32) {
+            sys::exit(0);
+        }
     }
 }

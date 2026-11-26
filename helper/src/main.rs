@@ -1,3 +1,12 @@
+/// One write per message, so lines do not interleave with nginx's.
+macro_rules! log {
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        let line = format!("sundew-helper: {}\n", format_args!($($arg)*));
+        let _ = std::io::stderr().write_all(line.as_bytes());
+    }};
+}
+
 mod engine;
 mod keeper;
 mod nl;
@@ -12,7 +21,7 @@ fn main() {
             Some("--engine") => engine = true,
             Some("--restarted") => restarted = true,
             _ => {
-                eprintln!("sundew-helper: started by nginx; not meant to be run directly");
+                log!("started by nginx; not meant to be run directly");
                 std::process::exit(64);
             }
         }

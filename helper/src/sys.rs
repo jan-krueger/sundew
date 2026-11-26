@@ -414,6 +414,32 @@ pub fn recv(fd: i32, buf: &mut [u8]) -> io::Result<(usize, i32)> {
     Ok((n as usize, flags))
 }
 
+/// Sends to the first fd in [first, first + n) that accepts it.
+pub fn send_first(first: i32, n: i32, b: &[u8]) {
+    for fd in first..first + n {
+        if send(fd, b).is_ok() {
+            return;
+        }
+    }
+}
+
+/// True if every fd in [first, first + n) reports POLLHUP.
+pub fn all_hung_up(first: i32, n: i32) -> bool {
+    let mut fds: Vec<libc::pollfd> = (first..first + n)
+        .map(|fd| libc::pollfd {
+            fd,
+            events: 0,
+            revents: 0,
+        })
+        .collect();
+    // SAFETY: fds.len() pollfds.
+    let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 0) };
+    r == n
+        && fds
+            .iter()
+            .all(|p| p.revents & (libc::POLLHUP | libc::POLLNVAL) != 0)
+}
+
 pub fn poll_in(fd: i32, timeout_ms: i32) -> io::Result<bool> {
     let mut p = libc::pollfd {
         fd,
