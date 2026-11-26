@@ -145,6 +145,16 @@ for c in short long magic op family pad0 pad1 v4-trailing empty-mask mask-range 
     check "$c: engine survived" [ "$(engines)" = "$E" ]
 done
 
+echo "== engine crash loop: the keeper gives up"
+for i in 1 2 3 4 5 6; do
+    wait_for '[ -n "$(engines)" ]' && kill -9 "$(engines)"
+done
+check "keeper gave up" wait_for '[ -z "$(keepers)" ]'
+check "logged" wait_for "grep -aq 'helper engine crashed 6 times in a row' $RUN/error.log"
+check "fresh addresses fail closed" is 10.251.0.1 403
+kill -HUP "$(master)"
+check "a reload starts a working helper" wait_for alive
+
 echo "== binary upgrade (USR2 + QUIT old)"
 old_master=$(master)
 kill -USR2 "$old_master"
@@ -161,9 +171,17 @@ check "nginx gone" wait_for '[ -z "$(pgrep -x nginx)" ]'
 check "helpers gone" wait_for '[ -z "$(keepers)" ] && [ -z "$(engines)" ]'
 
 unexpected() {
-    grep -aE '\[(alert|crit|emerg)\]' $RUN/error.log | grep -v -e sw_missing -e 'exited on signal 9' -e 'helper channel closed' -e "closed this worker's channel"
+    grep -aE '\[(alert|crit|emerg)\]' $RUN/error.log | grep -v -e sw_missing -e 'exited on signal 9' -e 'helper channel closed' -e "closed this worker's channel" -e 'crashed 6 times in a row'
     grep -aE 'engine (was )?(killed|exited)' $RUN/error.log | grep -v 'signal 9,'
 }
+echo "== nginx killed while the engine is down"
+conf
+start
+K=$(keepers)
+kill -9 "$(engines)"
+kill -9 "$(master)" $(pgrep -f 'nginx: worker')
+check "keeper exits once every channel is closed" wait_for '! kill -0 '"$K"' 2>/dev/null'
+
 unexpected | head -5 | sed 's/^/  log: /'
 check "no unexpected alert/crit/emerg in error log" [ -z "$(unexpected)" ]
 
