@@ -22,7 +22,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Requests wait for the helper without blocking the worker, up to
   `sundew_lookup_timeout` (default 100 ms). Concurrent requests for the same
   address share one lookup: 40 concurrent requests made 2 lookups, one per
-  worker.
+  worker. An answer arriving up to 5 s after the timeout still fills the cache,
+  so a slow kernel is not asked again for the same address.
 - `ipset_stats` (JSON) and `ipset_metrics` (Prometheus) endpoints, with
   counters that survive reloads.
 - The helper: a separate binary started by nginx that alone holds

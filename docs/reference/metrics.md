@@ -27,7 +27,7 @@ them.
 | `sundew_lookups_total` | `lookups` | Questions sent to the helper |
 | `sundew_coalesced_total` | `coalesced` | Requests that joined a question already on its way for the same address |
 | `sundew_timeouts_total` | `timeouts` | Questions not answered within `sundew_lookup_timeout` |
-| `sundew_late_replies_total` | `late_replies` | Answers that arrived after their timeout |
+| `sundew_late_replies_total` | `late_replies` | Answers that arrived after their timeout, up to 5 s late; they are still cached |
 | `sundew_helper_errors_total` | `helper_errors` | Questions the helper answered with an error |
 | `sundew_helper_down_total` | `helper_down` | Questions that could not be sent: the helper is gone |
 | `sundew_busy_total` | `busy` | Questions not sent: too many in flight in one worker |

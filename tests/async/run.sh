@@ -63,7 +63,10 @@ t=$(curl -s -o /dev/null -w '%{http_code} %{time_total}' -H 'X-Forwarded-For: 19
 check "fail closed on timeout ($t)" [ "${t% *}" = 403 ]
 check "answered at the deadline" awk -v t="${t#* }" 'BEGIN { exit !(t >= 0.09 && t < 0.29) }'
 check "timeout logged" wait_for "[ \$(dbg 'lookup timed out') -ge 1 ]"
-check "late reply discarded" wait_for "[ \$(dbg 'sundew stale reply') -ge 1 ]"
+check "late reply cached" wait_for "[ \$(dbg 'sundew late reply') -ge 1 ]"
+t=$(curl -s -o /dev/null -w '%{http_code} %{time_total}' -H 'X-Forwarded-For: 192.0.2.2' $URL1)
+[ "${t% *}" = 200 ] && awk -v t="${t#* }" 'BEGIN { exit !(t < 0.05) }'
+check "next request served from the cache ($t)" [ $? = 0 ]
 clean deadline
 restart "sundew_debug_delay 300ms;" "sundew_lookup_timeout 100ms; ipset_fail_open on;"
 check "fail open on timeout" [ "$(h1 192.0.2.1)" = 200 ]
