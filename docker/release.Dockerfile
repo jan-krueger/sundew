@@ -47,7 +47,7 @@ RUN set -eu; \
     echo "${NGINX_SHA256}  /tmp/nginx.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/nginx.tar.gz -C /tmp; \
     cd /tmp/nginx-${NGINX_VERSION}; \
-    ./configure --with-compat --add-dynamic-module=/src/sundew >/tmp/configure.log 2>&1 \
+    ./configure --with-compat --with-cc-opt='-O2 -g' --add-dynamic-module=/src/sundew >/tmp/configure.log 2>&1 \
         || { tail -30 /tmp/configure.log; exit 1; }; \
     make -j"$(nproc)" modules; \
     install -m 0644 objs/ngx_http_sundew_module.so /ngx_http_sundew_module.so; \

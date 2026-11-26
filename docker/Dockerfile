@@ -8,7 +8,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         build-essential ca-certificates curl gdb iproute2 ipset libcap2-bin \
         libpcre2-dev libssl-dev nghttp2-client openssl procps python3 strace \
-        zlib1g-dev \
+        wrk zlib1g-dev \
  && rm -rf /var/lib/apt/lists/* \
  && rustup component add clippy rustfmt \
  && groupadd -r -g 101 nginx && useradd -r -u 101 -g nginx -M -s /usr/sbin/nologin nginx \

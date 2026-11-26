@@ -16,7 +16,7 @@ VOLUME  := sundew-work-$(NGINX_VERSION)$(FLAVOR)
 RUN      = docker run --rm --init --cap-add NET_ADMIN $(SAN_ENV) \
              -v $(CURDIR):/src:ro -v $(VOLUME):/work $(1) $(IMAGE)
 
-.PHONY: image build unit fmt lint test test-async test-features test-all test-long test-pid1 release-image test-image artifacts docs docs-build docs-site shell clean
+.PHONY: image build unit fmt lint test test-async test-features test-all test-long test-pid1 release-image test-image bench artifacts docs docs-build docs-site shell clean
 
 image:
 	docker build -f docker/Dockerfile --target dev \
@@ -70,6 +70,9 @@ release-image:
 
 test-image: release-image image
 	tests/image/run.sh $(RELEASE_IMAGE) $(IMAGE)
+
+bench: release-image image
+	bench/run.sh $(RELEASE_IMAGE) $(IMAGE)
 
 artifacts:
 	docker build $(RELEASE_ARGS) --target artifacts --output type=local,dest=dist/$(subst :,-,$(subst /,-,$(BASE))) .
