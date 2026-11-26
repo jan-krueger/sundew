@@ -1,16 +1,28 @@
 include versions.mk
 
-IMAGE   := sundew-dev:nginx-$(NGINX_VERSION)
-VOLUME  := sundew-work-$(NGINX_VERSION)
-RUN      = docker run --rm --init --cap-add NET_ADMIN \
+ifeq ($(SAN),1)
+FLAVOR  := -san
+CC_OPT  := -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -DNGX_DEBUG_PALLOC=1
+LD_OPT  := -fsanitize=address,undefined
+SAN_ENV := -e ASAN_OPTIONS=detect_leaks=0:detect_odr_violation=0:log_path=/tmp/sundew/san/asan \
+           -e UBSAN_OPTIONS=print_stacktrace=1:log_path=/tmp/sundew/san/ubsan
+else
+CC_OPT  := -O1 -g
+LD_OPT  :=
+endif
+
+IMAGE   := sundew-dev:nginx-$(NGINX_VERSION)$(FLAVOR)
+VOLUME  := sundew-work-$(NGINX_VERSION)$(FLAVOR)
+RUN      = docker run --rm --init --cap-add NET_ADMIN $(SAN_ENV) \
              -v $(CURDIR):/src:ro -v $(VOLUME):/work $(1) $(IMAGE)
 
-.PHONY: image build unit fmt lint test test-long test-pid1 shell clean
+.PHONY: image build unit fmt lint test test-async test-long test-pid1 shell clean
 
 image:
 	docker build -f docker/Dockerfile --target dev \
 	    --build-arg NGINX_VERSION=$(NGINX_VERSION) \
 	    --build-arg NGINX_SHA256=$(NGINX_SHA256) \
+	    --build-arg NGINX_CC_OPT="$(CC_OPT)" --build-arg NGINX_LD_OPT="$(LD_OPT)" \
 	    -t $(IMAGE) .
 
 build: image
@@ -29,6 +41,9 @@ lint: image
 
 test: image
 	$(call RUN,--cap-add SYS_PTRACE) sh -c '/src/docker/build.sh && /src/tests/lifecycle/run.sh'
+
+test-async: image
+	$(call RUN,--cap-add SYS_PTRACE) sh -c '/src/docker/build.sh && /src/tests/async/run.sh'
 
 test-long: image
 	$(call RUN,--cap-add SYS_PTRACE -e RELOADS=1000) sh -c '/src/docker/build.sh && /src/tests/lifecycle/run.sh'

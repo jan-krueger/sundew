@@ -7,7 +7,8 @@ FROM rust:${RUST_VERSION}-slim-trixie AS toolchain
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         build-essential ca-certificates curl gdb iproute2 ipset libcap2-bin \
-        libpcre2-dev libssl-dev procps python3 strace zlib1g-dev \
+        libpcre2-dev libssl-dev nghttp2-client openssl procps python3 strace \
+        zlib1g-dev \
  && rm -rf /var/lib/apt/lists/* \
  && rustup component add clippy rustfmt \
  && groupadd -r -g 101 nginx && useradd -r -u 101 -g nginx -M -s /usr/sbin/nologin nginx \
@@ -18,8 +19,12 @@ FROM toolchain AS dev
 
 ARG NGINX_VERSION
 ARG NGINX_SHA256
+ARG NGINX_CC_OPT="-O1 -g"
+ARG NGINX_LD_OPT=""
 
 ENV NGINX_VERSION=${NGINX_VERSION} \
+    NGINX_CC_OPT="${NGINX_CC_OPT}" \
+    NGINX_LD_OPT="${NGINX_LD_OPT}" \
     NGINX_CONFIGURE_ARGS="--prefix=/opt/nginx --with-compat --with-debug --with-threads --with-http_realip_module --with-http_ssl_module --with-http_v2_module"
 
 RUN curl -fsSLo /tmp/nginx.tar.gz https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz \
@@ -29,7 +34,9 @@ RUN curl -fsSLo /tmp/nginx.tar.gz https://nginx.org/download/nginx-${NGINX_VERSI
  && mv /opt/src/nginx-${NGINX_VERSION} /opt/src/nginx \
  && rm /tmp/nginx.tar.gz \
  && cd /opt/src/nginx \
- && ./configure ${NGINX_CONFIGURE_ARGS} \
+ && if [ -f src/http/v3/ngx_http_v3.h ]; then echo " --with-http_v3_module" > /opt/src/v3; else : > /opt/src/v3; fi \
+ && ./configure ${NGINX_CONFIGURE_ARGS} $(cat /opt/src/v3) \
+        --with-cc-opt="${NGINX_CC_OPT}" --with-ld-opt="${NGINX_LD_OPT}" \
  && make -j"$(nproc)" \
  && make install \
  && mkdir -p /opt/nginx/modules
