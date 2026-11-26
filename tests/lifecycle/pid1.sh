@@ -11,7 +11,7 @@ docker run -d --name $C --cap-add NET_ADMIN --cap-add SYS_PTRACE \
         ipset create sw_bad4 hash:ip && ipset add sw_bad4 192.0.2.1 &&
         ipset create sw_bad6 hash:ip family inet6 &&
         mkdir -p $RUN/www && echo ok > $RUN/www/index.html &&
-        sed -e 's|@RUN@|$RUN|g' -e 's|@SETS@|ipset_blacklist sw_bad4 sw_bad6;|' -e 's|@MAIN@||' -e 's|@HTTP@||' -e 's|@H3@||' -e '/ssl_certificate/d' \
+        sed -e 's|@RUN@|$RUN|g' -e 's|@SETS@|ipset_blacklist sw_bad4 sw_bad6;|' -e 's|@MAIN@||' -e 's|@HTTP@||' -e 's|@LOC@||' -e 's|@H3@||' -e '/ssl_certificate/d' \
             /src/tests/nginx.conf.in > $RUN/nginx.conf &&
         exec /opt/nginx/sbin/nginx -c $RUN/nginx.conf -g 'daemon off;'" >/dev/null
 

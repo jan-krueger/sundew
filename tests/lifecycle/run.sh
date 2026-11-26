@@ -44,6 +44,7 @@ check "engine Seccomp=2" [ "$(status "$E" Seccomp)" = 2 ]
 check "engine uid sundew" [ "$(status "$E" Uid | cut -f1)" = "$(id -u sundew)" ]
 check "engine non-dumpable" [ "$(stat -c %U /proc/"$E"/fd 2>/dev/null)" = root ]
 check "engine empty environ" [ ! -s /proc/"$E"/environ ]
+check "engine landlock enforced" grep -aqh 'landlock enforced' $RUN/start.err $RUN/error.log
 check "keeper CapAmb=NET_ADMIN" [ "$(status "$K" CapAmb)" = $NET_ADMIN ]
 check "keeper CapBnd=NET_ADMIN" [ "$(status "$K" CapBnd)" = $NET_ADMIN ]
 check "keeper uid sundew" [ "$(status "$K" Uid | cut -f1)" = "$(id -u sundew)" ]
@@ -87,13 +88,13 @@ E=$(engines)
 check "same keeper" [ "$(keepers)" = "$K" ]
 check "re-exec'd engine CapEff=NET_ADMIN (ambient survived)" [ "$(status "$E" CapEff)" = $NET_ADMIN ]
 check "re-exec'd engine Seccomp=2" [ "$(status "$E" Seccomp)" = 2 ]
-check "lookup after engine restart" wait_for "is 192.0.2.1 403 && is 192.0.2.2 200"
+check "lookup after engine restart" wait_for alive
 
 echo "== worker crash"
 w=$(workers | head -1)
 kill -9 "$w"
 check "worker respawned" wait_for '[ "$(count workers)" = 2 ] && ! workers | grep -qx '"$w"
-n=0; for i in 1 2 3 4 5 6 7 8; do is 192.0.2.1 403 && is 192.0.2.2 200 && n=$((n + 1)); done
+n=0; for i in 1 2 3 4 5 6 7 8; do is 192.0.2.1 403 && alive && n=$((n + 1)); done
 check "lookups via respawned worker" [ "$n" = 8 ]
 
 echo "== reload"
@@ -119,7 +120,7 @@ for i in $(seq 1 "$RELOADS"); do
 done
 check "settles to one helper" wait_for '[ "$(count keepers)" = 1 ] && [ "$(count engines)" = 1 ]'
 check "master fds stable" [ "$(ls /proc/"$(master)"/fd | wc -l)" -le "$mfds" ]
-check "lookup after reloads" is 192.0.2.1 403
+check "lookup after reloads" alive
 check "no zombies" [ -z "$(ps -eo stat= | grep '^Z')" ]
 
 echo "== hostile worker frames"
@@ -148,7 +149,7 @@ check "two helpers during upgrade" wait_for '[ "$(count keepers)" = 2 ]'
 kill -QUIT "$old_master"
 check "old master gone" wait_for '! kill -0 '"$old_master"' 2>/dev/null'
 check "back to one helper" wait_for '[ "$(count keepers)" = 1 ] && [ "$(count engines)" = 1 ]'
-check "lookup after upgrade" is 192.0.2.1 403
+check "lookup after upgrade" alive
 
 echo "== shutdown"
 $NGINX -c $CONF -s quit

@@ -20,7 +20,7 @@ conf() {
         -keyout $RUN/key.pem -out $RUN/cert.pem -days 2 -subj /CN=localhost >/dev/null 2>&1
     echo ok > $RUN/www/index.html
     sed -e "s|@RUN@|$RUN|g" -e "s|@SETS@|${1:-ipset_blacklist sw_bad4 sw_bad6;}|" \
-        -e "s|@MAIN@|${MAIN:-}|" -e "s|@HTTP@|${HTTP:-}|" \
+        -e "s|@MAIN@|${MAIN:-}|" -e "s|@HTTP@|${HTTP:-}|" -e "s|@LOC@|${LOC:-}|" \
         -e "s|@H3@|$(h3_listen)|" \
         /src/tests/nginx.conf.in > $CONF
 }
@@ -47,6 +47,10 @@ wait_for() {
 # HTTP status for a client address (via X-Forwarded-For)
 code() { curl -s -o /dev/null -w '%{http_code}' -H "X-Forwarded-For: $1" "http://127.0.0.1:8080/"; }
 is() { [ "$(code "$1")" = "$2" ]; }
+
+# a never-seen address: 200 proves the helper answered (fail closed is 403)
+FRESH=0
+alive() { FRESH=$((FRESH + 1)); is "10.250.$((FRESH / 250)).$((FRESH % 250 + 1))" 200; }
 
 stop_all() {
     [ -f $RUN/nginx.pid ] && $NGINX -c $CONF -s stop 2>/dev/null
