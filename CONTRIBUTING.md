@@ -21,6 +21,7 @@ make fmt              # format the helper (writes through a patch, the source st
 make docs-build       # build the documentation the way CI will
 make docs             # serve it on http://127.0.0.1:8000
 make test-image       # build the release image and use it like a user would
+make bench            # throughput of the release image: no check, cache hits, misses
 make artifacts BASE=debian:trixie NGINX_VERSION=1.26.3 DISTRO_NGINX=1   # one release target into dist/
 
 make test-all SAN=1                  # nginx and the module with ASan and UBSan
