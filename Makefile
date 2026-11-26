@@ -16,7 +16,7 @@ VOLUME  := sundew-work-$(NGINX_VERSION)$(FLAVOR)
 RUN      = docker run --rm --init --cap-add NET_ADMIN $(SAN_ENV) \
              -v $(CURDIR):/src:ro -v $(VOLUME):/work $(1) $(IMAGE)
 
-.PHONY: image build unit fmt lint test test-async test-long test-pid1 shell clean
+.PHONY: image build unit fmt lint test test-async test-features test-all test-long test-pid1 docs docs-build shell clean
 
 image:
 	docker build -f docker/Dockerfile --target dev \
@@ -42,6 +42,12 @@ lint: image
 test: image
 	$(call RUN,--cap-add SYS_PTRACE) sh -c '/src/docker/build.sh && /src/tests/lifecycle/run.sh'
 
+test-features: image
+	$(call RUN,--cap-add SYS_PTRACE) sh -c '/src/docker/build.sh && /src/tests/features/run.sh'
+
+test-all: image
+	$(call RUN,--cap-add SYS_PTRACE) sh -c '/src/docker/build.sh && /src/tests/lifecycle/run.sh && /src/tests/async/run.sh && /src/tests/features/run.sh'
+
 test-async: image
 	$(call RUN,--cap-add SYS_PTRACE) sh -c '/src/docker/build.sh && /src/tests/async/run.sh'
 
@@ -50,6 +56,15 @@ test-long: image
 
 test-pid1: image
 	tests/lifecycle/pid1.sh $(IMAGE) $(VOLUME)
+
+DOCS_RUN = docker run --rm -v $(CURDIR):/src:ro -w /src $(1) python:3.12-slim \
+             sh -c 'pip install -q --disable-pip-version-check --root-user-action=ignore -r docs/requirements.txt && $(2)'
+
+docs-build:
+	$(call DOCS_RUN,,mkdocs build --strict -d /tmp/site)
+
+docs:
+	$(call DOCS_RUN,-p 127.0.0.1:8000:8000,mkdocs serve -a 0.0.0.0:8000)
 
 shell: image
 	docker run --rm -it --init --cap-add NET_ADMIN \
