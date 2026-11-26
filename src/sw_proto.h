@@ -97,6 +97,17 @@ typedef struct {
 #define SW_ST_SET_MISSING       4
 #define SW_ST_DRAINING          5
 
+/* helper -> worker log frame: req_id 0, status SW_ST_LOG | nginx log level,
+ * decided = event, matched = argument */
+#define SW_ST_LOG               0x80
+
+#define SW_LOG_TEST_FAILED      1       /* set index | errno << 32 */
+#define SW_LOG_SET_MISSING      2       /* set index */
+#define SW_LOG_NETLINK          3       /* errno */
+#define SW_LOG_VIOLATION        4       /* reason: 1 size, 2 frame, 3 set mask */
+#define SW_LOG_ENGINE_EXIT      5       /* wait status */
+#define SW_LOG_LANDLOCK         6       /* errno */
+
 typedef struct {
     uint16_t  magic;
     uint8_t   version;

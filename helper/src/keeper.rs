@@ -228,6 +228,13 @@ pub fn run() -> ! {
 
         let st = sys::waitpid(pid).unwrap_or_else(|e| fail(proto::ERR_SANDBOX, "waitpid", Some(e)));
 
+        if !(libc::WIFEXITED(st)
+            && (libc::WEXITSTATUS(st) == 0 || (libc::WEXITSTATUS(st) == 2 && !restarted)))
+        {
+            let log = proto::encode_log(proto::LVL_ERR, proto::LOG_ENGINE_EXIT, st as u32 as u64);
+            let _ = sys::send(proto::FD_SLOT0, &log);
+        }
+
         if libc::WIFEXITED(st) {
             match libc::WEXITSTATUS(st) {
                 0 => sys::exit(0),

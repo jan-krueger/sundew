@@ -32,6 +32,23 @@ pub const OP_TEST: u8 = 1;
 
 pub const ST_OK: u8 = 0;
 pub const ST_ERROR: u8 = 3;
+pub const ST_LOG: u8 = 0x80;
+
+// nginx log levels
+pub const LVL_ALERT: u8 = 2;
+pub const LVL_ERR: u8 = 4;
+pub const LVL_NOTICE: u8 = 6;
+
+pub const LOG_TEST_FAILED: u64 = 1;
+pub const LOG_SET_MISSING: u64 = 2;
+pub const LOG_NETLINK: u64 = 3;
+pub const LOG_VIOLATION: u64 = 4;
+pub const LOG_ENGINE_EXIT: u64 = 5;
+pub const LOG_LANDLOCK: u64 = 6;
+
+pub const VIOLATION_SIZE: u64 = 1;
+pub const VIOLATION_FRAME: u64 = 2;
+pub const VIOLATION_MASK: u64 = 3;
 
 pub const REQ_LEN: usize = 48;
 pub const REP_LEN: usize = 24;
@@ -227,6 +244,10 @@ pub fn encode_rep(status: u8, req_id: u32, decided: u64, matched: u64) -> [u8; R
     r[8..16].copy_from_slice(&decided.to_ne_bytes());
     r[16..24].copy_from_slice(&matched.to_ne_bytes());
     r
+}
+
+pub fn encode_log(level: u8, event: u64, arg: u64) -> [u8; REP_LEN] {
+    encode_rep(ST_LOG | level, 0, event, arg)
 }
 
 #[cfg(test)]

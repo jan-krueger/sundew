@@ -47,6 +47,7 @@ static void sw_client_timeout_handler(ngx_event_t *ev);
 static void sw_client_complete(sw_pending_t *p, ngx_uint_t result,
     uint64_t decided, uint64_t matched);
 static void sw_client_fail_all(ngx_uint_t result);
+static void sw_client_log(ngx_log_t *log, sw_rep_t *rep);
 
 
 static sw_client_t  *sw_client;
@@ -374,7 +375,11 @@ sw_client_read_handler(ngx_event_t *rev)
         }
 
         if (rep.req_id == 0) {
-            continue;                   /* LOG frame */
+            if (rep.status & SW_ST_LOG) {
+                sw_client_log(rev->log, &rep);
+            }
+
+            continue;
         }
 
         p = &sw_client->entries[rep.req_id & (SW_MAX_PENDING - 1)];
@@ -393,5 +398,88 @@ sw_client_read_handler(ngx_event_t *rev)
         sw_client_complete(p, rep.status == SW_ST_OK ? SW_RESULT_OK
                                                      : SW_RESULT_ERROR,
                            rep.decided, rep.matched);
+    }
+}
+
+
+static void
+sw_client_log(ngx_log_t *log, sw_rep_t *rep)
+{
+    int                      status;
+    ngx_str_t               *name, unknown = ngx_string("?");
+    ngx_uint_t               level, idx;
+    ngx_sundew_set_t        *set;
+    ngx_sundew_core_conf_t  *scf;
+    static const char       *violation[] = { "?", "wrong size", "malformed",
+                                             "sets not in the configuration" };
+
+    level = rep->status & ~SW_ST_LOG;
+
+    if (level < NGX_LOG_ALERT || level > NGX_LOG_INFO) {
+        level = NGX_LOG_ERR;
+    }
+
+    scf = (ngx_sundew_core_conf_t *) ngx_get_conf(ngx_cycle->conf_ctx,
+                                                  ngx_sundew_core_module);
+    set = scf->sets.elts;
+    idx = (ngx_uint_t) (rep->matched & 0xffffffff);
+    name = (idx < scf->sets.nelts) ? &set[idx].name : &unknown;
+
+    switch (rep->decided) {
+
+    case SW_LOG_TEST_FAILED:
+        ngx_log_error(level, log, 0,
+                      "sundew: lookup in set \"%V\" failed: kernel error %uD",
+                      name, (uint32_t) (rep->matched >> 32));
+        break;
+
+    case SW_LOG_SET_MISSING:
+        ngx_log_error(level, log, 0,
+                      "sundew: set \"%V\" no longer exists; lookups in it "
+                      "fail until it is recreated", name);
+        break;
+
+    case SW_LOG_NETLINK:
+        ngx_log_error(level, log, (ngx_err_t) rep->matched,
+                      "sundew: helper could not query the kernel");
+        break;
+
+    case SW_LOG_VIOLATION:
+        ngx_log_error(level, log, 0,
+                      "sundew: helper closed this worker's channel after a "
+                      "request that was %s",
+                      violation[rep->matched < 4 ? rep->matched : 0]);
+        break;
+
+    case SW_LOG_ENGINE_EXIT:
+        status = (int) rep->matched;
+
+        if (WIFSIGNALED(status) && WTERMSIG(status) == SIGSYS) {
+            ngx_log_error(level, log, 0,
+                          "sundew: helper engine was killed by seccomp "
+                          "(SIGSYS), restarting; please report this");
+
+        } else if (WIFSIGNALED(status)) {
+            ngx_log_error(level, log, 0,
+                          "sundew: helper engine was killed by signal %d, "
+                          "restarting", WTERMSIG(status));
+
+        } else {
+            ngx_log_error(level, log, 0,
+                          "sundew: helper engine exited with status %d, "
+                          "restarting", WEXITSTATUS(status));
+        }
+
+        break;
+
+    case SW_LOG_LANDLOCK:
+        ngx_log_error(level, log, (ngx_err_t) rep->matched,
+                      "sundew: Landlock is unavailable, the helper runs with "
+                      "seccomp only");
+        break;
+
+    default:
+        ngx_log_error(level, log, 0, "sundew: helper event %uL (%uL)",
+                      rep->decided, rep->matched);
     }
 }

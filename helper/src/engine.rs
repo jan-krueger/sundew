@@ -11,6 +11,7 @@ struct SetInfo {
 }
 
 struct Engine {
+    last_log: [u64; 8],
     nl: i32,
     proto: u8,
     seq: u32,
@@ -22,46 +23,58 @@ const SUPPORTED_TYPES: &[&[u8]] = &[b"hash:ip", b"hash:net", b"bitmap:ip"];
 const NL_TIMEOUT_MS: i32 = 1000;
 
 impl Engine {
+    /// Log frame to a worker, at most one per event and second.
+    fn log(&mut self, fd: i32, level: u8, event: u64, arg: u64) {
+        let now = sys::monotonic_ms();
+        let slot = (event as usize).min(self.last_log.len() - 1);
+        if self.last_log[slot] != 0 && now.saturating_sub(self.last_log[slot]) < 1000 {
+            return;
+        }
+        self.last_log[slot] = now;
+        let _ = sys::send(fd, &proto::encode_log(level, event, arg));
+    }
+
     fn next_seq(&mut self) -> u32 {
         self.seq = self.seq.wrapping_add(1).max(1);
         self.seq
     }
 
-    /// Returns errno per message; None on timeout or socket error.
+    /// Errno per message, or the errno of the failure.
     fn transact(
         &mut self,
         msgs: &[(u32, Vec<u8>)],
         mut on_data: impl FnMut(u32, u16, &[u8]),
-    ) -> Option<Vec<i32>> {
+    ) -> Result<Vec<i32>, i32> {
+        let errno = |e: std::io::Error| e.raw_os_error().unwrap_or(libc::EIO);
         for (_, m) in msgs {
-            if sys::send(self.nl, m).ok()? != m.len() {
-                return None;
+            if sys::send(self.nl, m).map_err(errno)? != m.len() {
+                return Err(libc::EMSGSIZE);
             }
         }
         let mut res: Vec<Option<i32>> = vec![None; msgs.len()];
         let mut left = msgs.len();
         while left > 0 {
-            if !sys::poll_in(self.nl, NL_TIMEOUT_MS).ok()? {
+            if !sys::poll_in(self.nl, NL_TIMEOUT_MS).map_err(errno)? {
                 eprintln!("sundew-helper: netlink timeout");
-                return None;
+                return Err(libc::ETIMEDOUT);
             }
             let (n, flags) = match sys::recv(self.nl, &mut self.rbuf) {
                 Ok(x) => x,
                 Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => continue,
                 Err(e) => {
                     eprintln!("sundew-helper: netlink recv: {e}");
-                    return None;
+                    return Err(errno(e));
                 }
             };
             if flags & libc::MSG_TRUNC != 0 || n > self.rbuf.len() {
                 eprintln!("sundew-helper: netlink reply truncated");
-                return None;
+                return Err(libc::EMSGSIZE);
             }
             let replies = match nl::parse(&self.rbuf[..n]) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("sundew-helper: netlink parse: {e}");
-                    return None;
+                    return Err(libc::EPROTO);
                 }
             };
             for r in replies {
@@ -79,7 +92,7 @@ impl Engine {
                 }
             }
         }
-        Some(res.into_iter().map(|r| r.unwrap_or(-libc::EIO)).collect())
+        Ok(res.into_iter().map(|r| r.unwrap_or(-libc::EIO)).collect())
     }
 
     fn negotiate(&mut self) -> (u8, u8) {
@@ -98,13 +111,13 @@ impl Engine {
             }
         });
         match r {
-            Some(v) if v[0] == 0 && kmax >= nl::IPSET_PROTOCOL_MIN => {}
-            Some(v) => fail(
+            Ok(v) if v[0] == 0 && kmax >= nl::IPSET_PROTOCOL_MIN => {}
+            Ok(v) => fail(
                 proto::ERR_KPROTO,
                 &format!("ipset protocol query failed ({})", v[0]),
                 None,
             ),
-            None => fail(proto::ERR_NETLINK, "ipset protocol query timed out", None),
+            Err(_) => fail(proto::ERR_NETLINK, "ipset protocol query failed", None),
         }
         if kmin == 0 {
             kmin = kmax;
@@ -134,8 +147,8 @@ impl Engine {
             }
         });
         rs.err = match r {
-            Some(v) => v[0],
-            None => -libc::ETIMEDOUT,
+            Ok(v) => v[0],
+            Err(e) => -e,
         };
         if rs.err == 0 {
             let tn = rs.type_name.split(|&c| c == 0).next().unwrap_or(&[]);
@@ -148,8 +161,8 @@ impl Engine {
         rs
     }
 
-    /// (status, decided, matched)
-    fn test(&mut self, mask: u64, addr: &Addr) -> (u8, u64, u64) {
+    /// (status, decided, matched); problems are logged to `fd`.
+    fn test(&mut self, fd: i32, mask: u64, addr: &Addr) -> (u8, u64, u64) {
         let mut msgs = Vec::new();
         let mut idx = Vec::new();
         for i in 0..self.sets.len() {
@@ -160,8 +173,12 @@ impl Engine {
                 idx.push(i);
             }
         }
-        let Some(res) = self.transact(&msgs, |_, _, _| {}) else {
-            return (proto::ST_ERROR, 0, 0);
+        let res = match self.transact(&msgs, |_, _, _| {}) {
+            Ok(r) => r,
+            Err(errno) => {
+                self.log(fd, proto::LVL_ERR, proto::LOG_NETLINK, errno as u64);
+                return (proto::ST_ERROR, 0, 0);
+            }
         };
         let (mut decided, mut matched) = (0u64, 0u64);
         for (k, errno) in res.into_iter().enumerate() {
@@ -172,10 +189,14 @@ impl Engine {
                     matched |= b;
                 }
                 e if e == -nl::IPSET_ERR_EXIST => decided |= b,
-                e => eprintln!(
-                    "sundew-helper: TEST {} failed: {}",
-                    String::from_utf8_lossy(&self.sets[idx[k]].name),
-                    e
+                e if e == -libc::ENOENT => {
+                    self.log(fd, proto::LVL_ERR, proto::LOG_SET_MISSING, idx[k] as u64)
+                }
+                e => self.log(
+                    fd,
+                    proto::LVL_ERR,
+                    proto::LOG_TEST_FAILED,
+                    idx[k] as u64 | ((-e) as u32 as u64) << 32,
                 ),
             }
         }
@@ -194,7 +215,8 @@ impl Engine {
     }
 }
 
-fn harden() {
+/// Returns the Landlock errno, if Landlock could not be enforced.
+fn harden() -> Option<i32> {
     let _ = sys::prctl(libc::PR_SET_DUMPABLE, 0, 0);
     // debug builds of the module log to the error log via stderr
     let stderr_is_file = sys::fstat(2).is_ok_and(|st| st.st_mode & libc::S_IFMT == libc::S_IFREG);
@@ -250,7 +272,8 @@ fn harden() {
     ];
     allow.extend_from_slice(arch_only);
 
-    match sys::landlock_deny_all() {
+    let landlock = sys::landlock_deny_all();
+    match &landlock {
         Ok(abi) => eprintln!("sundew-helper: landlock enforced (abi {abi})"),
         Err(e) => eprintln!("sundew-helper: landlock unavailable: {e}"),
     }
@@ -258,6 +281,10 @@ fn harden() {
     if let Err(e) = sys::seccomp_allowlist(&allow, &[libc::SYS_clone3]) {
         fail(proto::ERR_SANDBOX, "seccomp", Some(e));
     }
+
+    landlock
+        .err()
+        .map(|e| e.raw_os_error().unwrap_or(libc::EIO))
 }
 
 pub fn run(restarted: bool) -> ! {
@@ -292,6 +319,7 @@ pub fn run(restarted: bool) -> ! {
         .unwrap_or_else(|e| fail(proto::ERR_NETLINK, "netlink socket", Some(e)));
 
     let mut eng = Engine {
+        last_log: [0; 8],
         nl: nlfd,
         proto: nl::IPSET_PROTOCOL,
         seq: 0,
@@ -331,7 +359,14 @@ pub fn run(restarted: bool) -> ! {
         }
     }
 
-    harden();
+    if let Some(errno) = harden() {
+        eng.log(
+            proto::FD_SLOT0,
+            proto::LVL_NOTICE,
+            proto::LOG_LANDLOCK,
+            errno as u64,
+        );
+    }
 
     if policy.debug_delay_ms != 0 && !cfg!(feature = "test-delay") {
         fail(
@@ -400,48 +435,45 @@ pub fn run(restarted: bool) -> ! {
             }
 
             for _ in 0..64 {
-                let close_slot = match sys::recv(fd, &mut fbuf) {
+                let violation = |reason: u64| Some(reason);
+                let close_slot: Option<Option<u64>> = match sys::recv(fd, &mut fbuf) {
                     Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => break,
-                    Err(_) | Ok((0, _)) => true,
+                    Err(_) | Ok((0, _)) => Some(None),
                     Ok((len, flags)) => {
                         if flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0
                             || len != proto::REQ_LEN
                         {
-                            eprintln!(
-                                "sundew-helper: protocol violation on fd {fd}: bad frame size/flags"
-                            );
-                            true
+                            Some(violation(proto::VIOLATION_SIZE))
                         } else {
                             match proto::decode_req(&fbuf[..len]) {
                                 Ok(req) if eng.mask_valid(req.mask, &req.addr) => {
-                                    let (st, d, m) = eng.test(req.mask, &req.addr);
+                                    let (st, d, m) = eng.test(fd, req.mask, &req.addr);
                                     let rep = proto::encode_rep(st, req.req_id, d, m);
                                     if delay > 0 {
                                         delayed.push_back((sys::monotonic_ms() + delay, fd, rep));
                                         continue;
                                     }
                                     match sys::send(fd, &rep) {
-                                        Ok(_) => false,
-                                        Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => false,
-                                        Err(_) => true,
+                                        Ok(_) => None,
+                                        Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => None,
+                                        Err(_) => Some(None),
                                     }
                                 }
-                                Ok(_) => {
-                                    eprintln!(
-                                        "sundew-helper: protocol violation on fd {fd}: bad set mask"
-                                    );
-                                    true
-                                }
-                                Err(e) => {
-                                    eprintln!("sundew-helper: protocol violation on fd {fd}: {e}");
-                                    true
-                                }
+                                Ok(_) => Some(violation(proto::VIOLATION_MASK)),
+                                Err(_) => Some(violation(proto::VIOLATION_FRAME)),
                             }
                         }
                     }
                 };
 
-                if close_slot {
+                if let Some(reason) = close_slot {
+                    if let Some(reason) = reason {
+                        eprintln!("sundew-helper: protocol violation on fd {fd} ({reason})");
+                        let _ = sys::send(
+                            fd,
+                            &proto::encode_log(proto::LVL_ALERT, proto::LOG_VIOLATION, reason),
+                        );
+                    }
                     sys::epoll_del(ep, fd);
                     sys::shutdown(fd); // the keeper holds a duplicate
                     sys::close(fd);
