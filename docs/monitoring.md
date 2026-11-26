@@ -5,21 +5,21 @@ reloads. A restart of nginx resets them.
 
 ```nginx
 location = /sundew/stats {
-    ipset_blacklist off;
+    ipset_denylist off;
     ipset_stats;
     allow 127.0.0.1;
     deny all;
 }
 
 location = /sundew/metrics {
-    ipset_blacklist off;
+    ipset_denylist off;
     ipset_metrics;
     allow 10.0.0.0/8;
     deny all;
 }
 ```
 
-Turn the blacklist off on these locations: otherwise a helper outage, with
+Turn the denylist off on these locations: otherwise a helper outage, with
 `ipset_fail_open off`, also blocks your monitoring.
 
 ## Counters

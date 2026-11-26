@@ -7,9 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- `ipset_blacklist` and `ipset_whitelist` check clients against kernel ipsets
+- `ipset_denylist` and `ipset_allowlist` check clients against kernel ipsets
   of type `hash:ip`, `hash:net` and `bitmap:ip`, IPv4 and IPv6, in `http`,
-  `server` and `location`. Whitelist members skip the blacklist.
+  `server` and `location`. Allowlist members skip the denylist. `ipset_blacklist`
+  and `ipset_whitelist` work too, for configurations from the commercial module.
 - `ipset_status`, `ipset_fail_open` and `ipset_dryrun`, and the variables
   `$ipset_result` and `$ipset_matched_set`.
 - A cache shared by all workers (`ipset_cache_ttl`, default 60 s;

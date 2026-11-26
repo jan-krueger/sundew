@@ -30,7 +30,7 @@ code with it.
 
 | Directive | Sundew 0.1 |
 | --- | --- |
-| `ipset_blacklist`, `ipset_whitelist` | Yes, also in `location` |
+| `ipset_blacklist`, `ipset_whitelist` | Yes, also in `location`. Sundew's own names are `ipset_denylist` and `ipset_allowlist`; both pairs do the same |
 | `ipset_status`, `ipset_fail_open`, `ipset_dryrun`, `ipset_cache_ttl` | Yes, also in `location` |
 | `ipset_stats`, `ipset_metrics` | Yes; metric names start with `sundew_` |
 | `$ipset_result`, `$ipset_matched_set` | Yes; `$ipset_result` is `allow`, `deny` or `dryrun` |

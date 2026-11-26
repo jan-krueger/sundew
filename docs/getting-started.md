@@ -18,7 +18,7 @@ The image is the official nginx image with Sundew installed and loaded.
 
 ```bash
 cat > sundew.conf <<'CONF'
-ipset_blacklist bad_guys;
+ipset_denylist bad_guys;
 CONF
 
 docker run -d --name web --cap-add NET_ADMIN --network host \
@@ -102,13 +102,13 @@ load_module modules/ngx_http_sundew_module.so;
 user www-data;
 
 http {
-    ipset_blacklist bad_guys;
+    ipset_denylist bad_guys;
 
     server {
         listen 80;
 
         location = /sundew/metrics {
-            ipset_blacklist off;
+            ipset_denylist off;
             ipset_metrics;
             allow 127.0.0.1;
             deny all;

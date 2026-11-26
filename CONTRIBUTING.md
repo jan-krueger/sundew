@@ -12,7 +12,7 @@ the `ip_set` modules loaded (`make` does not load them).
 make build            # module and helper for NGINX_VERSION (default 1.30.8)
 make test             # lifecycle and privileges
 make test-async       # request suspension, aborts, resets, load
-make test-features    # cache, whitelist, dryrun, status, stats
+make test-features    # cache, allowlist, dryrun, status, stats
 make test-all         # the three suites
 make test-pid1        # nginx as PID 1 in a container
 make unit             # helper unit and fuzz tests

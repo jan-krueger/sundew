@@ -8,7 +8,7 @@ request, with no reload. It works behind CDNs and load balancers through
 nginx's `realip` module, for IPv4 and IPv6, over HTTP/1.1, HTTP/2 and HTTP/3.
 
 ```bash
-echo 'ipset_blacklist bad_guys;' > sundew.conf
+echo 'ipset_denylist bad_guys;' > sundew.conf
 docker run -d --cap-add NET_ADMIN --network host \
     -v "$PWD/sundew.conf:/etc/nginx/conf.d/sundew.conf:ro" ghcr.io/jan-krueger/sundew:latest
 ```
@@ -22,8 +22,10 @@ supervises is the only process with `CAP_NET_ADMIN`; it runs under seccomp and
 Landlock and answers only for the sets your configuration names. See the
 [security model](docs/security.md).
 
-Directive names match the commercial `ipset_*` module, so configurations can
-move over; see [Compatibility](docs/internals/compatibility.md).
+Configurations written for the commercial `ipset_*` module work as they are,
+including `ipset_blacklist` and `ipset_whitelist`; Sundew's own names are
+`ipset_denylist` and `ipset_allowlist`. See
+[Compatibility](docs/internals/compatibility.md).
 
 **Status:** pre-release, `0.1.0-dev`. Lookups only: `ipset_autoadd` and
 `ipset_ratelimit` are planned for 0.2.

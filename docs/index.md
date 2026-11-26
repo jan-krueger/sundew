@@ -8,7 +8,7 @@ applies to the next request; nginx does not reload.
 load_module modules/ngx_http_sundew_module.so;
 
 http {
-    ipset_blacklist bad_guys;
+    ipset_denylist bad_guys;
 }
 ```
 
