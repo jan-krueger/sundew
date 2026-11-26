@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # release.yml runs the full suite before publishing.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make lint
+      - run: make unit
+      - run: make docs-build
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        nginx: ["1.24.0", "1.30.8", "1.31.10"]
+        san: [""]
+        include:
+          - nginx: "1.30.8"
+            san: "1"
+    name: test (nginx ${{ matrix.nginx }}${{ matrix.san && ', sanitizers' || '' }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Load the ip_set kernel modules
+        run: ./.github/load-ipset.sh
+      - run: make test-all NGINX_VERSION=${{ matrix.nginx }} SAN=${{ matrix.san }}
+      - run: make test-pid1 NGINX_VERSION=${{ matrix.nginx }}
+        if: matrix.san == ''
+
+  image:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        base: ["nginx:1.30.8", "nginx:1.30.8-alpine"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Load the ip_set kernel modules
+        run: ./.github/load-ipset.sh
+      - run: make test-image BASE=${{ matrix.base }} RELEASE_IMAGE=sundew-test

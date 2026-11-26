@@ -1,0 +1,137 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/sundew
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  artifacts:
+    needs: ci
+    runs-on: ${{ matrix.arch.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        arch:
+          - { name: amd64, runner: ubuntu-latest }
+          - { name: arm64, runner: ubuntu-24.04-arm }
+        target:
+          - { name: nginx.org-1.30.8, base: "nginx:1.30.8", nginx: "1.30.8" }
+          - { name: nginx.org-1.30.8-alpine, base: "nginx:1.30.8-alpine", nginx: "1.30.8" }
+          - { name: nginx.org-1.31.10, base: "nginx:1.31.10", nginx: "1.31.10" }
+          - { name: nginx.org-1.31.10-alpine, base: "nginx:1.31.10-alpine", nginx: "1.31.10" }
+          - { name: debian13, base: "debian:trixie", nginx: "1.26.3", distro: "1" }
+          - { name: ubuntu24.04, base: "ubuntu:24.04", nginx: "1.24.0", distro: "1" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build
+        run: >
+          make artifacts BASE=${{ matrix.target.base }} NGINX_VERSION=${{ matrix.target.nginx }}
+          DISTRO_NGINX=${{ matrix.target.distro }}
+      - name: Package
+        run: |
+          name="sundew-${GITHUB_REF_NAME#v}-${{ matrix.target.name }}-${{ matrix.arch.name }}"
+          dir="dist/$(echo '${{ matrix.target.base }}' | tr ':/' '--')"
+          mkdir -p "pkg/$name"
+          cp "$dir/ngx_http_sundew_module.so" "$dir/sundew-helper" LICENSE "pkg/$name/"
+          tar -C pkg -czf "$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.target.name }}-${{ matrix.arch.name }}
+          path: "*.tar.gz"
+          if-no-files-found: error
+
+  images:
+    needs: ci
+    runs-on: ${{ matrix.arch.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        arch:
+          - { name: amd64, runner: ubuntu-latest }
+          - { name: arm64, runner: ubuntu-24.04-arm }
+        target:
+          - { tag: "nginx1.30.8", base: "nginx:1.30.8", nginx: "1.30.8" }
+          - { tag: "nginx1.30.8-alpine", base: "nginx:1.30.8-alpine", nginx: "1.30.8" }
+          - { tag: "nginx1.31.10", base: "nginx:1.31.10", nginx: "1.31.10" }
+          - { tag: "nginx1.31.10-alpine", base: "nginx:1.31.10-alpine", nginx: "1.31.10" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Load the ip_set kernel modules
+        run: ./.github/load-ipset.sh
+      - name: Build and test
+        run: >
+          make test-image BASE=${{ matrix.target.base }} NGINX_VERSION=${{ matrix.target.nginx }}
+          RELEASE_IMAGE="$IMAGE:${GITHUB_REF_NAME#v}-${{ matrix.target.tag }}-${{ matrix.arch.name }}"
+      - name: Push
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:${GITHUB_REF_NAME#v}-${{ matrix.target.tag }}-${{ matrix.arch.name }}"
+
+  manifests:
+    needs: images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Multi-arch tags
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          v=${GITHUB_REF_NAME#v}
+          for t in nginx1.30.8 nginx1.30.8-alpine nginx1.31.10 nginx1.31.10-alpine; do
+              docker buildx imagetools create -t "$IMAGE:$v-$t" "$IMAGE:$v-$t-amd64" "$IMAGE:$v-$t-arm64"
+          done
+          docker buildx imagetools create -t "$IMAGE:$v" "$IMAGE:$v-nginx1.30.8"
+          case "$v" in *-*) ;; *) docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$v-nginx1.30.8" ;; esac
+
+  release:
+    needs: [artifacts, manifests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: out
+          merge-multiple: true
+      - run: cd out && sha256sum -- *.tar.gz > SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: out/*.tar.gz
+      - name: Release notes from CHANGELOG.md
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          awk -v v="$v" '$0 ~ "^## \\[" v "\\]" { on = 1; next } /^## \[/ { on = 0 } on' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "CHANGELOG.md has no section for $v" >&2; exit 1; }
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pre=""; case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" --verify-tag $pre --title "$GITHUB_REF_NAME" \
+              --notes-file notes.md out/*.tar.gz out/SHA256SUMS
