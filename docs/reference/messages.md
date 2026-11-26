@@ -42,6 +42,9 @@ Configuration mistakes are reported by `nginx -t`:
 
 ## While running
 
+Errors inside the helper arrive in nginx's error log through the workers; the
+helper repeats the same message at most once a second.
+
 | Message | Level | Means |
 | --- | --- | --- |
 | `deny ADDR (in denylist, set S)` | info | Denied: `ADDR` is in denylist set `S` |
@@ -52,6 +55,13 @@ Configuration mistakes are reported by `nginx -t`:
 | `lookup timed out (req_id N)` | info | The helper did not answer within [`sundew_lookup_timeout`](directives.md#sundew_lookup_timeout) |
 | `helper channel closed; lookups now follow the fail policy` | alert | This worker lost its helper. Cached bans still apply; a reload starts a new helper |
 | `send to helper failed` | error | A question could not be sent; the request follows the fail policy |
+| `set "X" no longer exists; lookups in it fail until it is recreated` | error | The set was destroyed while nginx runs. Requests that need it follow the fail policy; recreate the set |
+| `lookup in set "X" failed: kernel error N` | error | The kernel refused a lookup; the request follows the fail policy |
+| `helper could not query the kernel` | error | Netlink failed (with the system error); the request follows the fail policy |
+| `helper engine was killed by signal N, restarting` | error | The engine crashed and is being restarted. Lookups in flight time out |
+| `helper engine was killed by seccomp (SIGSYS), restarting; please report this` | error | The engine made a system call its filter forbids: a bug, please report it |
+| `helper closed this worker's channel after a request that was …` | alert | The worker sent something malformed. Its lookups follow the fail policy until it restarts; a bug, please report it |
+| `Landlock is unavailable, the helper runs with seccomp only` | notice | The kernel has no Landlock (Linux before 5.13, or disabled) |
 | `helper P started (generation G, N slots, M sets)` | notice | A helper started, at start or reload |
 | `draining helper P (generation G, deadline Ds)` | notice | After a reload, the previous helper serves old workers until they exit |
 | `helper P overstayed its drain deadline, killing it` | warn | An old helper did not exit in time |

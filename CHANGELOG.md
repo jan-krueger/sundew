@@ -31,6 +31,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   start only without capabilities.
 - nginx refuses to start, or keeps its old configuration on reload, when a set
   is missing or of an unsupported type.
+- Errors inside the helper reach nginx's error log through the workers: a set
+  destroyed while nginx runs, kernel errors, engine crashes and malformed
+  requests, each at most once a second.
 - Docker images on GHCR: the official nginx image, stable and mainline, Debian
   and Alpine, amd64 and arm64, with Sundew installed and loaded.
 - Prebuilt modules and a static helper for nginx.org 1.30.8 and 1.31.10
