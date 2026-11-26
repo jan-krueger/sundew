@@ -95,7 +95,8 @@ Both can read the same set: the firewall can drop what nginx never needs to see.
 
 </div>
 
-!!! note "Pre-release"
-    Sundew is at 0.1.0-dev and these pages follow `main`. The
+!!! note "Version 0.1"
+    Sundew 0.1 looks addresses up; `ipset_autoadd` and `ipset_ratelimit`,
+    which add to sets, are planned for 0.2. These pages follow `main`; the
     [changelog](https://github.com/jan-krueger/sundew/blob/main/CHANGELOG.md)
-    says what has shipped.
+    says what each release contains.

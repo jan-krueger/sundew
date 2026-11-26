@@ -51,7 +51,7 @@ them.
 
     ```json
     {
-      "version": "0.1.0-dev",
+      "version": "0.1.0",
       "counters": { "checked": 990240, "allowed": 989036, "denied": 1204, "cache_hit": 982113, "…": 0 },
       "sets": { "f2b-web": { "matched": 1188 }, "office": { "matched": 16 } }
     }

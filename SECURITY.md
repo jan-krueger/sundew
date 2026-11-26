@@ -7,7 +7,7 @@ on the Security tab. Please do not open a public issue for a vulnerability.
 
 ## Supported versions
 
-Sundew is pre-release; fixes go to `main`.
+Fixes go to `main` and into a release of the latest minor version.
 
 ## Scope
 

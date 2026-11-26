@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-26
+
+The first release.
+
 ### Added
 - `ipset_denylist` and `ipset_allowlist` check clients against kernel ipsets
   of type `hash:ip`, `hash:net` and `bitmap:ip`, IPv4 and IPv6, in `http`,
@@ -44,3 +48,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Tested on nginx 1.24.0, 1.30.8 and 1.31.10, including builds with AddressSanitizer
   and UndefinedBehaviorSanitizer, across reloads, binary upgrades, worker and
   helper crashes, client aborts and HTTP/2 and HTTP/3 stream resets.
+
+[Unreleased]: https://github.com/jan-krueger/sundew/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/jan-krueger/sundew/releases/tag/v0.1.0
