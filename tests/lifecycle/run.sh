@@ -119,9 +119,12 @@ for i in $(seq 1 "$RELOADS"); do
     sleep 0.05
 done
 check "settles to one helper" wait_for '[ "$(count keepers)" = 1 ] && [ "$(count engines)" = 1 ]'
-check "master fds stable" [ "$(ls /proc/"$(master)"/fd | wc -l)" -le "$mfds" ]
+# drained helpers' pidfds are dropped at the next reload
+kill -HUP "$(master)"
+wait_for '[ "$(count keepers)" = 1 ] && [ "$(count engines)" = 1 ]'
+check "master fds stable" wait_for '[ "$(ls /proc/"$(master)"/fd | wc -l)" -le "$mfds" ]'
 check "lookup after reloads" alive
-check "no zombies" [ -z "$(ps -eo stat= | grep '^Z')" ]
+check "no zombies" wait_for '[ -z "$(ps -eo stat= | grep "^Z")" ]'
 
 echo "== hostile worker frames"
 for c in short long magic op family pad0 pad1 v4-trailing empty-mask mask-range cross-family ancillary; do
