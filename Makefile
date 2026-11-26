@@ -7,7 +7,7 @@ LD_OPT  := -fsanitize=address,undefined
 SAN_ENV := -e ASAN_OPTIONS=detect_leaks=0:detect_odr_violation=0:log_path=/tmp/sundew/san/asan \
            -e UBSAN_OPTIONS=print_stacktrace=1:log_path=/tmp/sundew/san/ubsan
 else
-CC_OPT  := -O1 -g
+CC_OPT  := -O2 -g -Wp,-D_FORTIFY_SOURCE=2 -fstack-protector-strong
 LD_OPT  :=
 endif
 
@@ -16,7 +16,7 @@ VOLUME  := sundew-work-$(NGINX_VERSION)$(FLAVOR)
 RUN      = docker run --rm --init --cap-add NET_ADMIN $(SAN_ENV) \
              -v $(CURDIR):/src:ro -v $(VOLUME):/work $(1) $(IMAGE)
 
-.PHONY: image build unit fmt lint test test-async test-features test-all test-long test-pid1 docs docs-build shell clean
+.PHONY: image build unit fmt lint test test-async test-features test-all test-long test-pid1 release-image test-image artifacts docs docs-build docs-site shell clean
 
 image:
 	docker build -f docker/Dockerfile --target dev \
@@ -57,11 +57,34 @@ test-long: image
 test-pid1: image
 	tests/lifecycle/pid1.sh $(IMAGE) $(VOLUME)
 
+# release builds: BASE is an official nginx image or a distribution (DISTRO_NGINX=1)
+BASE         ?= nginx:$(NGINX_VERSION)
+DISTRO_NGINX ?=
+RELEASE_ARGS  = -f docker/release.Dockerfile --build-arg BASE=$(BASE) \
+                --build-arg NGINX_VERSION=$(NGINX_VERSION) --build-arg NGINX_SHA256=$(NGINX_SHA256) \
+                --build-arg DISTRO_NGINX=$(DISTRO_NGINX)
+RELEASE_IMAGE ?= sundew:nginx$(NGINX_VERSION)
+
+release-image:
+	docker build $(RELEASE_ARGS) --target image -t $(RELEASE_IMAGE) .
+
+test-image: release-image image
+	tests/image/run.sh $(RELEASE_IMAGE) $(IMAGE)
+
+artifacts:
+	docker build $(RELEASE_ARGS) --target artifacts --output type=local,dest=dist/$(subst :,-,$(subst /,-,$(BASE))) .
+
 DOCS_RUN = docker run --rm -v $(CURDIR):/src:ro -w /src $(1) python:3.12-slim \
              sh -c 'pip install -q --disable-pip-version-check --root-user-action=ignore -r docs/requirements.txt && $(2)'
 
 docs-build:
 	$(call DOCS_RUN,,mkdocs build --strict -d /tmp/site)
+
+docs-site:
+	mkdir -p site
+	docker run --rm -v $(CURDIR):/src:ro -v $(CURDIR)/site:/site -w /src --user $$(id -u):$$(id -g) \
+	    -e HOME=/tmp python:3.12-slim sh -c 'pip install -q --disable-pip-version-check --user \
+	    -r docs/requirements.txt && python -m mkdocs build --strict -d /site'
 
 docs:
 	$(call DOCS_RUN,-p 127.0.0.1:8000:8000,mkdocs serve -a 0.0.0.0:8000)

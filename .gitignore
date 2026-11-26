@@ -1,2 +1,4 @@
+dist/
 .fmt.patch
 helper/target/
+site/
