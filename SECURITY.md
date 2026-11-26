@@ -20,4 +20,4 @@ In scope:
 - Memory-safety bugs in the module or the helper.
 - A helper that keeps capabilities or file descriptors it should not have.
 
-The [security model](docs/security.md) describes what each process may do.
+The [security model](docs/concepts/security.md) describes what each process may do.

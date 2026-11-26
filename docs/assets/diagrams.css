@@ -1,0 +1,62 @@
+:root {
+  --sw-hot: hsl(14, 85%, 48%);
+  --sw-root: hsl(220, 10%, 46%);
+  --sw-workers: hsl(145, 50%, 34%);
+  --sw-helper: hsl(34, 90%, 40%);
+  --sw-kernel: hsl(262, 45%, 52%);
+}
+
+[data-md-color-scheme="slate"] {
+  --sw-hot: hsl(14, 95%, 64%);
+  --sw-root: hsl(220, 12%, 66%);
+  --sw-workers: hsl(145, 50%, 58%);
+  --sw-helper: hsl(36, 95%, 60%);
+  --sw-kernel: hsl(262, 70%, 74%);
+}
+
+.sw-figure { margin: 1.6em 0; }
+.sw-figure svg { display: block; width: 100%; height: auto; max-width: 1000px; margin: 0 auto; }
+.sw-figure figcaption {
+  max-width: 46rem; margin: .7em auto 0; text-align: center;
+  font-size: .75rem; color: var(--md-default-fg-color--light);
+}
+
+.sw-diagram { color: var(--md-default-fg-color); font-family: var(--md-text-font-family, sans-serif); }
+.sw-diagram text { fill: currentColor; font-size: 17px; }
+.sw-diagram .sub { font-size: 14px; fill: var(--md-default-fg-color--light); }
+.sw-diagram .title { font-weight: 600; }
+.sw-diagram .grid-dot { fill: currentColor; opacity: .14; }
+
+.sw-diagram .box { fill: var(--md-default-bg-color); stroke: currentColor; stroke-width: 1.3; }
+.sw-diagram .zone { stroke-width: 1.2; stroke-dasharray: 5 4; }
+.sw-diagram .z-root    { stroke: var(--sw-root);    fill: color-mix(in srgb, var(--sw-root) 8%, transparent); }
+.sw-diagram .z-workers { stroke: var(--sw-workers); fill: color-mix(in srgb, var(--sw-workers) 9%, transparent); }
+.sw-diagram .z-helper  { stroke: var(--sw-helper);  fill: color-mix(in srgb, var(--sw-helper) 10%, transparent); }
+.sw-diagram .z-kernel  { stroke: var(--sw-kernel);  fill: color-mix(in srgb, var(--sw-kernel) 9%, transparent); }
+.sw-diagram .zl { font-size: 15px; font-weight: 600; }
+.sw-diagram .zl-root    { fill: var(--sw-root); }
+.sw-diagram .zl-workers { fill: var(--sw-workers); }
+.sw-diagram .zl-helper  { fill: var(--sw-helper); }
+.sw-diagram .zl-kernel  { fill: var(--sw-kernel); }
+
+.sw-diagram .edge { fill: none; stroke: currentColor; stroke-width: 1.3; }
+.sw-diagram .edge.dashed { stroke-dasharray: 5 4; }
+.sw-diagram .edge.hot { stroke: var(--sw-hot); stroke-width: 2; }
+.sw-diagram .head { fill: currentColor; }
+.sw-diagram .head.hot { fill: var(--sw-hot); }
+.sw-diagram .hot-label { fill: var(--sw-hot); font-size: 14px; font-weight: 600; }
+
+.md-typeset .grid.two { grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); }
+@media screen and (min-width: 60em) { .md-typeset .grid.two { grid-template-columns: repeat(2, 1fr); } }
+
+.md-typeset table.sw-directive {
+  display: table; border-collapse: collapse; margin: .2em 0 1.2em; font-size: .72rem;
+  background: var(--md-code-bg-color); border-left: .2rem solid var(--md-primary-fg-color);
+  border-radius: .1rem;
+}
+.md-typeset table.sw-directive th {
+  text-align: left; vertical-align: top; white-space: nowrap; font-weight: 600;
+  padding: .35em 1.4em .35em .9em; color: var(--md-default-fg-color--light);
+}
+.md-typeset table.sw-directive td { padding: .35em 1em .35em 0; }
+.md-typeset table.sw-directive code { background: none; padding: 0; font-size: 1em; }

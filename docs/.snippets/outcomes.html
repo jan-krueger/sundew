@@ -1,0 +1,46 @@
+<figure class="sw-figure">
+<svg class="sw-diagram" viewBox="0 0 1000 300" role="img" aria-label="With an answer, the lists decide: allow, or deny with ipset_status, or under ipset_dryrun allow and log. Without an answer, a ban cached within ipset_cache_ttl plus 10 minutes denies; otherwise ipset_fail_open decides.">
+<defs>
+<pattern id="out-grid" width="20" height="20" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" class="grid-dot"/></pattern>
+<marker id="out-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+<marker id="out-ah-hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head hot"/></marker>
+</defs>
+<rect width="1000" height="300" fill="url(#out-grid)"/>
+<rect x="20" y="122" width="140" height="56" rx="8" class="box"/>
+<text x="90" y="146" text-anchor="middle" class="title">lookup</text>
+<text x="90" y="164" text-anchor="middle" class="sub">cache, then helper</text>
+<path d="M160,140 H190 V68 H228" class="edge" marker-end="url(#out-ah)"/>
+<path d="M160,160 H190 V232 H228" class="edge hot" marker-end="url(#out-ah-hot)"/>
+<rect x="230" y="40" width="200" height="56" rx="8" class="box"/>
+<text x="330" y="64" text-anchor="middle" class="title">answer</text>
+<text x="330" y="82" text-anchor="middle" class="sub">in / not in each set</text>
+<rect x="230" y="204" width="200" height="56" rx="8" class="box"/>
+<text x="330" y="228" text-anchor="middle" class="title">no answer</text>
+<text x="330" y="246" text-anchor="middle" class="sub">timeout, error, helper gone</text>
+<path d="M430,60 H470 V35 H598" class="edge" marker-end="url(#out-ah)"/>
+<path d="M430,76 H470 V101 H598" class="edge" marker-end="url(#out-ah)"/>
+<text x="478" y="27" class="sub">lists allow</text>
+<text x="478" y="122" class="sub">lists deny</text>
+<rect x="600" y="12" width="180" height="44" rx="8" class="box"/>
+<text x="690" y="39" text-anchor="middle" class="title">allow</text>
+<rect x="600" y="80" width="180" height="44" rx="8" class="box"/>
+<text x="690" y="107" text-anchor="middle" class="title">deny</text>
+<line x1="780" y1="102" x2="828" y2="102" class="edge dashed" marker-end="url(#out-ah)"/>
+<text x="804" y="94" text-anchor="middle" class="sub">dryrun</text>
+<rect x="830" y="80" width="150" height="44" rx="8" class="box"/>
+<text x="905" y="107" text-anchor="middle" class="title">allow, log</text>
+<path d="M430,224 H470 V199 H598" class="edge hot" marker-end="url(#out-ah-hot)"/>
+<path d="M430,240 H470 V265 H598" class="edge hot" marker-end="url(#out-ah-hot)"/>
+<text x="478" y="191" class="sub">cached ban</text>
+<text x="478" y="290" class="sub">otherwise</text>
+<rect x="600" y="176" width="180" height="44" rx="8" class="box"/>
+<text x="690" y="203" text-anchor="middle" class="title">deny</text>
+<rect x="600" y="244" width="180" height="44" rx="8" class="box"/>
+<text x="690" y="271" text-anchor="middle" class="title">ipset_fail_open</text>
+<path d="M780,258 H806 V232 H828" class="edge" marker-end="url(#out-ah)"/>
+<path d="M780,274 H806 V282 H828" class="edge" marker-end="url(#out-ah)"/>
+<text x="840" y="237" class="sub"><tspan class="title">on</tspan>: allow</text>
+<text x="840" y="287" class="sub"><tspan class="title">off</tspan> (default): deny</text>
+</svg>
+<figcaption>With an answer, the lists decide. Without one, a ban cached within <code>ipset_cache_ttl</code> plus 10 minutes still denies, so overloading the helper unbans nobody; everything else follows <code>ipset_fail_open</code>.</figcaption>
+</figure>

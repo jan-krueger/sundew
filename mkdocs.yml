@@ -1,6 +1,8 @@
 site_name: Sundew
 site_description: "Kernel ipset access control for nginx, without giving your web server root"
+site_url: https://jan-krueger.github.io/sundew/
 repo_url: https://github.com/jan-krueger/sundew
+repo_name: jan-krueger/sundew
 edit_uri: ""
 strict: true
 
@@ -9,35 +11,75 @@ validation:
 
 theme:
   name: material
+  icon:
+    repo: fontawesome/brands/github
   features:
+    - navigation.tabs
     - navigation.sections
-    - content.code.copy
-    - toc.integrate
     - navigation.indexes
+    - navigation.footer
+    - navigation.top
+    - toc.follow
+    - search.suggest
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
       primary: green
+      accent: deep orange
       toggle: { icon: material/weather-night, name: Dark mode }
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
       primary: green
+      accent: deep orange
       toggle: { icon: material/weather-sunny, name: Light mode }
 
 nav:
-  - Overview: index.md
-  - Getting started: getting-started.md
-  - Configuration: configuration.md
-  - Security model: security.md
-  - Monitoring: monitoring.md
-  - Troubleshooting: troubleshooting.md
-  - Internals:
-      - How it works: internals/how-it-works.md
-      - Compatibility: internals/compatibility.md
+  - Home: index.md
+  - Get started: get-started.md
+  - Guides:
+      - guides/index.md
+      - Feed a set from fail2ban: guides/fail2ban.md
+      - Behind a CDN or load balancer: guides/behind-a-proxy.md
+      - Restrict an admin area: guides/admin-area.md
+      - Roll out a new list safely: guides/dry-run.md
+      - Docker and Kubernetes: guides/containers.md
+      - Monitor with Prometheus: guides/prometheus.md
+      - Migrate from ngx_http_ipset_access_module: guides/migrate.md
+      - Troubleshooting: guides/troubleshooting.md
+  - Reference:
+      - reference/index.md
+      - Directives: reference/directives.md
+      - Variables: reference/variables.md
+      - Metrics: reference/metrics.md
+      - Log messages: reference/messages.md
+  - Concepts:
+      - concepts/index.md
+      - How a request is checked: concepts/request-flow.md
+      - Security model: concepts/security.md
+      - Caching: concepts/caching.md
+      - Reloads and crashes: concepts/lifecycle.md
+      - Compatibility: concepts/compatibility.md
+
+extra_css:
+  - assets/diagrams.css
 
 markdown_extensions:
   - admonition
-  - pymdownx.details
-  - pymdownx.superfences
+  - attr_list
+  - def_list
+  - md_in_html
   - tables
   - toc: { permalink: true }
+  - pymdownx.details
+  - pymdownx.highlight: { anchor_linenums: true }
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.superfences
+  - pymdownx.tabbed: { alternate_style: true }
+  - pymdownx.snippets: { base_path: [docs/.snippets], check_paths: true }
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg

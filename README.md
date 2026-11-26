@@ -15,31 +15,33 @@ docker run -d --cap-add NET_ADMIN --network host \
 
 Prebuilt modules exist for the nginx.org packages, Debian 13 and Ubuntu 24.04;
 any other nginx 1.24+ builds from source. See
-[Getting started](docs/getting-started.md).
+[Get started](docs/get-started.md).
 
 nginx workers keep no privileges. A small helper that nginx starts and
 supervises is the only process with `CAP_NET_ADMIN`; it runs under seccomp and
 Landlock and answers only for the sets your configuration names. See the
-[security model](docs/security.md).
+[security model](docs/concepts/security.md).
 
 Configurations written for the commercial `ipset_*` module work as they are,
 including `ipset_blacklist` and `ipset_whitelist`; Sundew's own names are
 `ipset_denylist` and `ipset_allowlist`. See
-[Compatibility](docs/internals/compatibility.md).
+[migration guide](docs/guides/migrate.md).
 
 **Status:** pre-release, `0.1.0-dev`. Lookups only: `ipset_autoadd` and
 `ipset_ratelimit` are planned for 0.2.
 
 ## Documentation
 
+The documentation is published at <https://jan-krueger.github.io/sundew/>.
+
 | | |
 | --- | --- |
-| [Getting started](docs/getting-started.md) | Docker image, prebuilt module or source; block a set |
-| [Configuration](docs/configuration.md) | Directives and variables |
-| [Security model](docs/security.md) | What each process may do |
-| [Monitoring](docs/monitoring.md) | JSON and Prometheus counters |
-| [Troubleshooting](docs/troubleshooting.md) | Startup errors and their fixes |
-| [How it works](docs/internals/how-it-works.md) | Processes, cache, reloads |
+| [Get started](docs/get-started.md) | Install with Docker, a prebuilt module or from source; block your first address |
+| [Guides](docs/guides/index.md) | fail2ban, CDNs, admin areas, dry runs, Docker and Kubernetes, Prometheus, migration |
+| [Directives](docs/reference/directives.md) | Every directive, with syntax, default and context |
+| [Log messages](docs/reference/messages.md) | What each message means and how to fix it |
+| [Security model](docs/concepts/security.md) | What each process may do |
+| [How a request is checked](docs/concepts/request-flow.md) | The request path, the cache and what it costs |
 
 ## License
 

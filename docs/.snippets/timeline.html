@@ -1,0 +1,26 @@
+<figure class="sw-figure">
+<svg class="sw-diagram" viewBox="0 0 1000 170" role="img" aria-label="An address looked up 20 seconds before it is added to a set keeps its cached not-in answer until 60 seconds after the lookup; the next request after that asks the kernel and is denied.">
+<defs>
+<pattern id="tl-grid" width="20" height="20" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" class="grid-dot"/></pattern>
+<marker id="tl-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+<marker id="tl-ah-hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head hot"/></marker>
+</defs>
+<rect width="1000" height="170" fill="url(#tl-grid)"/>
+<rect x="100" y="76" width="520" height="22" rx="4" class="zone z-workers"/>
+<text x="360" y="92" text-anchor="middle" class="zl zl-workers">cached: “not in”, ipset_cache_ttl 60s</text>
+<line x1="40" y1="110" x2="960" y2="110" class="edge" marker-end="url(#tl-ah)"/>
+<line x1="100" y1="104" x2="100" y2="116" class="edge"/>
+<text x="100" y="138" text-anchor="middle" class="title">−20 s</text>
+<text x="100" y="156" text-anchor="middle" class="sub">request, looked up</text>
+<line x1="273" y1="60" x2="273" y2="116" class="edge hot"/>
+<text x="273" y="40" text-anchor="middle" class="hot-label">0 s: ipset add</text>
+<text x="273" y="138" text-anchor="middle" class="sub">still allowed</text>
+<line x1="620" y1="104" x2="620" y2="116" class="edge"/>
+<text x="620" y="138" text-anchor="middle" class="title">+40 s</text>
+<text x="620" y="156" text-anchor="middle" class="sub">cached answer expires</text>
+<line x1="800" y1="104" x2="800" y2="116" class="edge"/>
+<text x="800" y="138" text-anchor="middle" class="title">next request</text>
+<text x="800" y="156" text-anchor="middle" class="sub">kernel says “in”: 403</text>
+</svg>
+<figcaption>A change reaches an address that was looked up recently when its cached answer expires: at most <code>ipset_cache_ttl</code> later. Addresses not looked up within that time see it at once.</figcaption>
+</figure>

@@ -1,0 +1,43 @@
+<figure class="sw-figure">
+<svg class="sw-diagram" viewBox="0 0 1000 250" role="img" aria-label="A cache hit is answered inside the worker. A miss sends the address to the helper, which tests it in the kernel; the answer returns to the worker, which caches it and resumes the request.">
+<defs>
+<pattern id="req-grid" width="20" height="20" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" class="grid-dot"/></pattern>
+<marker id="req-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+<marker id="req-ah-hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head hot"/></marker>
+</defs>
+<rect width="1000" height="250" fill="url(#req-grid)"/>
+<rect x="20" y="20" width="540" height="210" rx="12" class="zone z-workers"/>
+<text x="34" y="218" class="zl zl-workers">nginx worker · keeps serving other requests</text>
+<rect x="44" y="44" width="120" height="44" rx="8" class="box"/>
+<text x="104" y="71" text-anchor="middle" class="title">realip</text>
+<line x1="164" y1="66" x2="202" y2="66" class="edge" marker-end="url(#req-ah)"/>
+<rect x="204" y="44" width="150" height="44" rx="8" class="box"/>
+<text x="279" y="71" text-anchor="middle" class="title">Sundew</text>
+<line x1="354" y1="66" x2="420" y2="66" class="edge" marker-end="url(#req-ah)"/>
+<text x="387" y="58" text-anchor="middle" class="sub">allow</text>
+<rect x="422" y="44" width="120" height="44" rx="8" class="box"/>
+<text x="482" y="71" text-anchor="middle" class="title">limit_req…</text>
+<rect x="120" y="140" width="150" height="50" rx="8" class="box"/>
+<text x="195" y="162" text-anchor="middle" class="title">sundew_cache</text>
+<text x="195" y="179" text-anchor="middle" class="sub">shared memory</text>
+<line x1="240" y1="90" x2="240" y2="138" class="edge" marker-end="url(#req-ah)"/>
+<text x="248" y="118" class="sub">1 look up</text>
+<text x="206" y="118" text-anchor="end" class="sub">hit</text>
+<line x1="214" y1="138" x2="214" y2="90" class="edge" marker-end="url(#req-ah)"/>
+<path d="M345,88 V155 H613" class="edge hot" marker-end="url(#req-ah-hot)"/>
+<text x="470" y="147" text-anchor="middle" class="hot-label">2 miss: address, set ids</text>
+<path d="M615,178 H330 V90" class="edge hot" marker-end="url(#req-ah-hot)"/>
+<text x="470" y="196" text-anchor="middle" class="hot-label">4 answer: worker caches it</text>
+<rect x="600" y="20" width="180" height="210" rx="12" class="zone z-helper"/>
+<text x="614" y="218" class="zl zl-helper">helper</text>
+<rect x="615" y="140" width="140" height="50" rx="8" class="box"/>
+<text x="685" y="170" text-anchor="middle" class="title">sundew-engine</text>
+<line x1="755" y1="165" x2="853" y2="165" class="edge" marker-start="url(#req-ah)" marker-end="url(#req-ah)"/>
+<text x="796" y="155" text-anchor="middle" class="sub">3 test</text>
+<rect x="840" y="20" width="140" height="210" rx="12" class="zone z-kernel"/>
+<text x="854" y="218" class="zl zl-kernel">kernel</text>
+<rect x="855" y="140" width="110" height="50" rx="8" class="box"/>
+<text x="910" y="170" text-anchor="middle" class="title">ip_set</text>
+</svg>
+<figcaption>A cache hit (1) is answered inside the worker in under a microsecond. A miss (2–4) asks the helper, which tests the address in the kernel; the worker caches the answer for every worker and resumes the request. Meanwhile it serves other connections.</figcaption>
+</figure>
