@@ -38,7 +38,7 @@ typedef struct {
     uint32_t  helper_gid;
     uint32_t  worker_uid;
     uint32_t  generation;
-    uint32_t  reserved;
+    uint32_t  debug_delay_ms;                   /* test builds only */
 } sw_policy_hdr_t;
 
 typedef struct {

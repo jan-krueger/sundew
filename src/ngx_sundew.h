@@ -26,6 +26,7 @@ typedef struct {
     ngx_str_t                helper_user;
     ngx_msec_t               handshake_timeout;
     time_t                   drain_timeout;
+    ngx_msec_t               debug_delay;
 
     ngx_array_t              sets;          /* ngx_sundew_set_t */
 
@@ -34,6 +35,8 @@ typedef struct {
     ngx_uint_t               generation;
     ngx_uint_t               nslots;
     ngx_fd_t                *slots;         /* worker ends, one per slot */
+    uint64_t                 mask4;         /* sets of family inet */
+    uint64_t                 mask6;
 } ngx_sundew_core_conf_t;
 
 
@@ -43,6 +46,5 @@ extern ngx_module_t  ngx_sundew_core_module;
 ngx_int_t ngx_sundew_add_set(ngx_conf_t *cf, ngx_str_t *name,
     ngx_uint_t role);
 
-ngx_fd_t ngx_sundew_worker_slot(ngx_cycle_t *cycle);
 
 #endif /* NGX_SUNDEW_H */

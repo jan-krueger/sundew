@@ -18,6 +18,7 @@
 #include <sys/wait.h>
 
 #include "ngx_sundew.h"
+#include "sw_client.h"
 
 
 #ifndef SYS_pidfd_open
@@ -111,6 +112,15 @@ static ngx_command_t  ngx_sundew_core_commands[] = {
       offsetof(ngx_sundew_core_conf_t, drain_timeout),
       NULL },
 
+#if (NGX_DEBUG)
+    { ngx_string("sundew_debug_delay"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_msec_slot,
+      0,
+      offsetof(ngx_sundew_core_conf_t, debug_delay),
+      NULL },
+#endif
+
       ngx_null_command
 };
 
@@ -150,6 +160,7 @@ ngx_sundew_core_create_conf(ngx_cycle_t *cycle)
 
     scf->handshake_timeout = NGX_CONF_UNSET_MSEC;
     scf->drain_timeout = NGX_CONF_UNSET;
+    scf->debug_delay = NGX_CONF_UNSET_MSEC;
 
     if (ngx_array_init(&scf->sets, cycle->pool, 4, sizeof(ngx_sundew_set_t))
         != NGX_OK)
@@ -228,6 +239,7 @@ ngx_sundew_core_init_conf(ngx_cycle_t *cycle, void *conf)
 
     ngx_conf_init_msec_value(scf->handshake_timeout, 5000);
     ngx_conf_init_value(scf->drain_timeout, 3600);
+    ngx_conf_init_msec_value(scf->debug_delay, 0);
 
     if (scf->helper_user.len == 0) {
         ngx_str_set(&scf->helper_user, "sundew");
@@ -410,6 +422,7 @@ ngx_sundew_policy_fd(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf,
     hdr->helper_gid = hgid;
     hdr->worker_uid = wuid;
     hdr->generation = (uint32_t) scf->generation;
+    hdr->debug_delay_ms = (uint32_t) scf->debug_delay;
 
     p = buf + sizeof(sw_policy_hdr_t);
     set = scf->sets.elts;
@@ -887,6 +900,14 @@ ngx_sundew_handshake(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf, int ctl)
         }
 
         set[i].family = rs[i].family;
+
+        if (set[i].family == AF_INET6) {
+            scf->mask6 |= (uint64_t) 1 << i;
+
+        } else {
+            scf->mask4 |= (uint64_t) 1 << i;
+        }
+
         ngx_memcpy(set[i].type, rs[i].type, SW_SETNAME_LEN);
         set[i].type[SW_SETNAME_LEN - 1] = '\0';
 
@@ -1028,24 +1049,6 @@ ngx_sundew_core_init_module(ngx_cycle_t *cycle)
 }
 
 
-ngx_fd_t
-ngx_sundew_worker_slot(ngx_cycle_t *cycle)
-{
-    ngx_sundew_core_conf_t  *scf;
-
-    scf = (ngx_sundew_core_conf_t *) ngx_get_conf(cycle->conf_ctx,
-                                                  ngx_sundew_core_module);
-
-    if (!scf->active || ngx_process != NGX_PROCESS_WORKER
-        || ngx_worker >= scf->nslots)
-    {
-        return NGX_INVALID_FILE;
-    }
-
-    return scf->slots[ngx_worker];
-}
-
-
 static ngx_int_t
 ngx_sundew_core_init_process(ngx_cycle_t *cycle)
 {
@@ -1091,6 +1094,12 @@ ngx_sundew_core_init_process(ngx_cycle_t *cycle)
     }
 
     if (ngx_sundew_verify_no_caps(cycle) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    if (ngx_process == NGX_PROCESS_WORKER
+        && sw_client_init(cycle, scf->slots[ngx_worker]) != NGX_OK)
+    {
         return NGX_ERROR;
     }
 
