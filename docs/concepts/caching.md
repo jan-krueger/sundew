@@ -40,8 +40,8 @@ an admin reaches nginx:
 | `sundew_cache_size` | Answers |
 | --- | --- |
 | `1m` | about 25,000 |
-| `16m` (default) | about 450,000 |
-| `64m` | about 1,800,000 |
+| `16m` (default) | about 400,000 |
+| `64m` | about 1,600,000 |
 
 One answer is one address for one set: an address checked against three sets
 takes three. A full cache costs extra lookups, not errors: the oldest answer in

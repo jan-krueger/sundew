@@ -14,7 +14,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `ipset_status`, `ipset_fail_open` and `ipset_dryrun`, and the variables
   `$ipset_result` and `$ipset_matched_set`.
 - A cache shared by all workers (`ipset_cache_ttl`, default 60 s;
-  `sundew_cache_size`, default 16 MB for about 450,000 answers). It survives
+  `sundew_cache_size`, default 16 MB for about 400,000 answers). It survives
   reloads. A cache hit costs no measurable throughput on a 2-worker test
   machine.
 - While the helper cannot answer, cached bans keep applying for 10 minutes

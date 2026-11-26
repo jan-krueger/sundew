@@ -170,7 +170,7 @@ location = /metrics {
 <tr><th>Context</th><td>main</td></tr>
 </table>
 
-Shared memory for cached answers, at least `1m`. 16 MB holds about 450,000
+Shared memory for cached answers, at least `1m`. 16 MB holds about 400,000
 answers; one answer is one address for one set.
 
 ### sundew_helper_path

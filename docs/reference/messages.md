@@ -61,6 +61,7 @@ helper repeats the same message at most once a second.
 | `helper engine was killed by signal N, restarting` | error | The engine crashed and is being restarted. Lookups in flight time out |
 | `helper engine was killed by seccomp (SIGSYS), restarting; please report this` | error | The engine made a system call its filter forbids: a bug, please report it |
 | `helper closed this worker's channel after a request that was …` | alert | The worker sent something malformed. Its lookups follow the fail policy until it restarts; a bug, please report it |
+| `helper engine crashed N times in a row; the helper stopped, …` | alert | The engine crashed 6 times, each within a minute of starting. Lookups follow the fail policy and cached bans apply until a reload starts a new helper. Please report it |
 | `Landlock is unavailable, the helper runs with seccomp only` | notice | The kernel has no Landlock (Linux before 5.13, or disabled) |
 | `helper P started (generation G, N slots, M sets)` | notice | A helper started, at start or reload |
 | `draining helper P (generation G, deadline Ds)` | notice | After a reload, the previous helper serves old workers until they exit |
