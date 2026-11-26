@@ -17,6 +17,7 @@
 
 #define SW_MAX_PENDING      1024        /* power of two */
 #define SW_BUCKETS          256
+#define SW_LATE_GRACE       5000        /* ms a timed-out lookup waits for a late answer */
 
 
 typedef struct {
@@ -25,6 +26,7 @@ typedef struct {
     ngx_event_t      timer;
     uint32_t         req_id;            /* 0 = free */
     uint32_t         hash;
+    ngx_uint_t       late;              /* timed out, waiting for the answer */
     uint64_t         mask;
     ngx_uint_t       family;
     u_char           addr[16];
@@ -261,6 +263,33 @@ sw_client_store(sw_pending_t *p, uint64_t decided, uint64_t matched)
 
 
 static void
+sw_client_release(sw_pending_t *p)
+{
+    p->req_id = 0;
+    p->late = 0;
+    ngx_queue_insert_tail(&sw_client->free, &p->link);
+    sw_client->npending--;
+}
+
+
+static void
+sw_client_late(sw_pending_t *p, ngx_uint_t result, uint64_t decided,
+    uint64_t matched)
+{
+    if (p->timer.timer_set) {
+        ngx_del_timer(&p->timer);
+    }
+
+    if (result == SW_RESULT_OK) {
+        sw_client_store(p, decided, matched);
+        sw_stats_inc(SW_STAT_LATE_REPLIES);
+    }
+
+    sw_client_release(p);
+}
+
+
+static void
 sw_client_complete(sw_pending_t *p, ngx_uint_t result, uint64_t decided,
     uint64_t matched)
 {
@@ -280,10 +309,17 @@ sw_client_complete(sw_pending_t *p, ngx_uint_t result, uint64_t decided,
         ngx_del_timer(&p->timer);
     }
 
-    p->req_id = 0;
     ngx_queue_remove(&p->link);
-    ngx_queue_insert_tail(&sw_client->free, &p->link);
-    sw_client->npending--;
+
+    if (result == SW_RESULT_TIMEOUT) {
+        /* stays out of the buckets, so new requests ask again */
+        p->late = 1;
+        ngx_queue_init(&p->link);
+        ngx_add_timer(&p->timer, SW_LATE_GRACE);
+
+    } else {
+        sw_client_release(p);
+    }
 
     while (!ngx_queue_empty(&p->waiters)) {
         q = ngx_queue_head(&p->waiters);
@@ -305,6 +341,11 @@ sw_client_timeout_handler(ngx_event_t *ev)
 {
     sw_pending_t  *p = ev->data;
 
+    if (p->late) {
+        sw_client_release(p);
+        return;
+    }
+
     ngx_log_error(NGX_LOG_INFO, ev->log, 0,
                   "sundew: lookup timed out (req_id %uD)", p->req_id);
 
@@ -318,7 +359,14 @@ sw_client_fail_all(ngx_uint_t result)
     ngx_uint_t  i;
 
     for (i = 0; i < SW_MAX_PENDING; i++) {
-        if (sw_client->entries[i].req_id) {
+        if (sw_client->entries[i].req_id == 0) {
+            continue;
+        }
+
+        if (sw_client->entries[i].late) {
+            sw_client_late(&sw_client->entries[i], result, 0, 0);
+
+        } else {
             sw_client_complete(&sw_client->entries[i], result, 0, 0);
         }
     }
@@ -387,13 +435,21 @@ sw_client_read_handler(ngx_event_t *rev)
         if (p->req_id != rep.req_id) {
             ngx_log_debug1(NGX_LOG_DEBUG_HTTP, rev->log, 0,
                            "sundew stale reply req_id:%uD", rep.req_id);
-            sw_stats_inc(SW_STAT_LATE_REPLIES);
             continue;
         }
 
         ngx_log_debug3(NGX_LOG_DEBUG_HTTP, rev->log, 0,
                        "sundew reply req_id:%uD decided:%uL matched:%uL",
                        rep.req_id, rep.decided, rep.matched);
+
+        if (p->late) {
+            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, rev->log, 0,
+                           "sundew late reply req_id:%uD cached", rep.req_id);
+            sw_client_late(p, rep.status == SW_ST_OK ? SW_RESULT_OK
+                                                     : SW_RESULT_ERROR,
+                           rep.decided, rep.matched);
+            continue;
+        }
 
         sw_client_complete(p, rep.status == SW_ST_OK ? SW_RESULT_OK
                                                      : SW_RESULT_ERROR,
