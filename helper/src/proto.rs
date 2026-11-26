@@ -62,6 +62,7 @@ pub struct Policy {
     pub helper_gid: u32,
     pub worker_uid: u32,
     pub generation: u32,
+    pub debug_delay_ms: u32,
     pub sets: Vec<PolicySet>,
 }
 
@@ -119,6 +120,7 @@ impl Policy {
             helper_gid: u32_at(b, 16),
             worker_uid: u32_at(b, 20),
             generation: u32_at(b, 24),
+            debug_delay_ms: u32_at(b, 28),
             sets,
         })
     }

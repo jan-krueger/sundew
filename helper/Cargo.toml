@@ -7,6 +7,9 @@ license = "BSD-2-Clause"
 description = "Privileged helper for the Sundew nginx module: the only process holding CAP_NET_ADMIN"
 publish = false
 
+[features]
+test-delay = []
+
 [dependencies]
 libc = "0.2"
 

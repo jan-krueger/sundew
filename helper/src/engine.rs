@@ -328,15 +328,34 @@ pub fn run(restarted: bool) -> ! {
 
     harden();
 
+    if policy.debug_delay_ms != 0 && !cfg!(feature = "test-delay") {
+        fail(
+            proto::ERR_POLICY,
+            "sundew_debug_delay needs a test-delay build",
+            None,
+        );
+    }
+    let delay = policy.debug_delay_ms as u64;
+    let mut delayed: std::collections::VecDeque<(u64, i32, [u8; proto::REP_LEN])> =
+        std::collections::VecDeque::new();
+
     let mut ctl_open = true;
     let mut deadline: Option<u64> = None;
     let mut evs = [libc::epoll_event { events: 0, u64: 0 }; 32];
     let mut fbuf = [0u8; 256];
 
     loop {
-        let timeout = match deadline {
+        let now = sys::monotonic_ms();
+        while let Some(&(due, fd, rep)) = delayed.front() {
+            if due > now {
+                break;
+            }
+            delayed.pop_front();
+            let _ = sys::send(fd, &rep);
+        }
+
+        let mut timeout = match deadline {
             Some(d) => {
-                let now = sys::monotonic_ms();
                 if now >= d {
                     sys::exit(0);
                 }
@@ -344,6 +363,10 @@ pub fn run(restarted: bool) -> ! {
             }
             None => -1,
         };
+        if let Some(&(due, _, _)) = delayed.front() {
+            let t = due.saturating_sub(now) as i32;
+            timeout = if timeout < 0 { t } else { timeout.min(t) };
+        }
 
         let n = match sys::epoll_wait(ep, &mut evs, timeout) {
             Ok(n) => n,
@@ -388,6 +411,10 @@ pub fn run(restarted: bool) -> ! {
                                 Ok(req) if eng.mask_valid(req.mask, &req.addr) => {
                                     let (st, d, m) = eng.test(req.mask, &req.addr);
                                     let rep = proto::encode_rep(st, req.req_id, d, m);
+                                    if delay > 0 {
+                                        delayed.push_back((sys::monotonic_ms() + delay, fd, rep));
+                                        continue;
+                                    }
                                     match sys::send(fd, &rep) {
                                         Ok(_) => false,
                                         Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => false,
