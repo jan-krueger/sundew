@@ -86,6 +86,7 @@ kill -9 "$E"
 check "new engine" wait_for '[ -n "$(engines)" ] && [ "$(engines)" != "'"$old"'" ]'
 E=$(engines)
 check "same keeper" [ "$(keepers)" = "$K" ]
+check "crash in nginx's error log" wait_for "grep -aq 'helper engine was killed by signal 9, restarting' $RUN/error.log"
 check "re-exec'd engine CapEff=NET_ADMIN (ambient survived)" [ "$(status "$E" CapEff)" = $NET_ADMIN ]
 check "re-exec'd engine Seccomp=2" [ "$(status "$E" Seccomp)" = 2 ]
 check "lookup after engine restart" wait_for alive
@@ -160,8 +161,8 @@ check "nginx gone" wait_for '[ -z "$(pgrep -x nginx)" ]'
 check "helpers gone" wait_for '[ -z "$(keepers)" ] && [ -z "$(engines)" ]'
 
 unexpected() {
-    grep -aE '\[(alert|crit|emerg)\]' $RUN/error.log | grep -v -e sw_missing -e 'exited on signal 9' -e 'helper channel closed'
-    grep -aE 'engine (killed|exited)' $RUN/error.log | grep -v 'signal 9,'
+    grep -aE '\[(alert|crit|emerg)\]' $RUN/error.log | grep -v -e sw_missing -e 'exited on signal 9' -e 'helper channel closed' -e "closed this worker's channel"
+    grep -aE 'engine (was )?(killed|exited)' $RUN/error.log | grep -v 'signal 9,'
 }
 unexpected | head -5 | sed 's/^/  log: /'
 check "no unexpected alert/crit/emerg in error log" [ -z "$(unexpected)" ]

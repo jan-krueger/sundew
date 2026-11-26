@@ -102,6 +102,16 @@ check "ipset_status 444 closes the connection ($c)" [ "$c" = 000 ]
 c=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 192.0.2.1' http://127.0.0.1:8080/open)
 check "ipset_denylist off in a location ($c)" [ "$c" = 200 ]
 
+echo "== a set destroyed while running"
+ipset create sw_tmp hash:ip
+restart "ipset_denylist sw_bad4 sw_tmp;"
+check "before: fresh address allowed" is 192.0.2.60 200
+ipset destroy sw_tmp
+check "after: lookups fail closed" is 192.0.2.61 403
+check "logged in nginx's error log" wait_for "grep -aq 'set \"sw_tmp\" no longer exists' $RUN/error.log"
+ipset create sw_tmp hash:ip
+check "recreated: lookups work again" wait_for "is 192.0.2.62 200"
+
 echo "== set types"
 restart "ipset_denylist sw_bm sw_net4;"
 check "bitmap:ip hit" is 192.0.2.77 403

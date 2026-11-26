@@ -48,11 +48,18 @@ def roundtrip(s, f):
 
 
 def closed(s):
+    """True if the helper logged a violation and then closed the channel."""
     s.settimeout(2)
+    logged = False
     try:
-        return s.recv(64) == b""
+        while True:
+            m = s.recv(64)
+            if not m:
+                return logged
+            if len(m) == 24 and struct.unpack_from("=I", m, 4)[0] == 0 and m[3] & 0x80:
+                logged = logged or struct.unpack_from("=Q", m, 8)[0] == 4
     except (ConnectionResetError, BrokenPipeError):
-        return True
+        return logged
     except socket.timeout:
         return False
 
