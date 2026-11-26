@@ -725,8 +725,13 @@ ngx_sundew_spawn(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf,
                                    scf->nslots, tmp);
         }
 
-        (void) write(pipefd[1], &helper, sizeof(pid_t));
-        _exit(helper == -1 ? 1 : 0);
+        if (write(pipefd[1], &helper, sizeof(pid_t)) != sizeof(pid_t)
+            || helper == -1)
+        {
+            _exit(1);
+        }
+
+        _exit(0);
     }
 
     if (pid == -1) {
