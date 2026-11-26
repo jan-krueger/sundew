@@ -25,7 +25,7 @@ wait_for() { for _ in $(seq 1 100); do eval "$1" >/dev/null 2>&1 && return 0; sl
 cat > "$CONF/sundew.conf" <<'CONF'
 set_real_ip_from 127.0.0.1;
 real_ip_header X-Forwarded-For;
-ipset_blacklist bad4 bad6;
+ipset_denylist bad4 bad6;
 CONF
 
 echo "== $IMAGE"

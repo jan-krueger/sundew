@@ -34,8 +34,8 @@ http {
 
         root @RUN@/www;
 
-        location = /stats   { ipset_blacklist off; ipset_stats; }
-        location = /metrics { ipset_blacklist off; ipset_metrics; }
+        location = /stats   { ipset_denylist off; ipset_stats; }
+        location = /metrics { ipset_denylist off; ipset_metrics; }
         @LOC@
     }
 

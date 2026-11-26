@@ -19,7 +19,7 @@ conf() {
     [ -f $RUN/cert.pem ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
         -keyout $RUN/key.pem -out $RUN/cert.pem -days 2 -subj /CN=localhost >/dev/null 2>&1
     echo ok > $RUN/www/index.html
-    sed -e "s|@RUN@|$RUN|g" -e "s|@SETS@|${1:-ipset_blacklist sw_bad4 sw_bad6;}|" \
+    sed -e "s|@RUN@|$RUN|g" -e "s|@SETS@|${1:-ipset_denylist sw_bad4 sw_bad6;}|" \
         -e "s|@MAIN@|${MAIN:-}|" -e "s|@HTTP@|${HTTP:-}|" -e "s|@LOC@|${LOC:-}|" \
         -e "s|@H3@|$(h3_listen)|" \
         /src/tests/nginx.conf.in > $CONF

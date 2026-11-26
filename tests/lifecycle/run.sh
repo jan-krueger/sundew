@@ -7,7 +7,7 @@ RELOADS=${RELOADS:-100}
 
 echo "== startup failures"
 stop_all; setup_sets
-conf "ipset_blacklist sw_missing;"
+conf "ipset_denylist sw_missing;"
 $NGINX -c $CONF 2>$RUN/start.err
 check "missing set refuses to start" [ -z "$(pgrep -x nginx)" ]
 check "missing set message" grep -q 'set "sw_missing": set does not exist' $RUN/start.err
@@ -98,7 +98,7 @@ n=0; for i in 1 2 3 4 5 6 7 8; do is 192.0.2.1 403 && alive && n=$((n + 1)); don
 check "lookups via respawned worker" [ "$n" = 8 ]
 
 echo "== reload"
-conf "ipset_blacklist sw_bad4 sw_bad6 sw_net4;"
+conf "ipset_denylist sw_bad4 sw_bad6 sw_net4;"
 $NGINX -c $CONF -s reload
 check "new generation running" wait_for "is 198.51.100.7 403"
 check "old helper gone" wait_for '[ "$(count keepers)" = 1 ] && [ "$(count engines)" = 1 ]'
@@ -106,12 +106,12 @@ check "drain logged" grep -aq 'draining helper' $RUN/error.log
 mfds=$(ls /proc/"$(master)"/fd | wc -l)
 
 echo "== failed reload keeps old config"
-conf "ipset_blacklist sw_bad4 sw_missing;"
+conf "ipset_denylist sw_bad4 sw_missing;"
 $NGINX -c $CONF -s reload
 check "reload rejected" wait_for "grep -aq 'set \"sw_missing\": set does not exist' $RUN/error.log"
 check "old config still serving" is 198.51.100.7 403
 check "rejected helper cleaned up" wait_for '[ "$(count keepers)" = 1 ]'
-conf "ipset_blacklist sw_bad4 sw_bad6 sw_net4;"
+conf "ipset_denylist sw_bad4 sw_bad6 sw_net4;"
 
 echo "== $RELOADS reloads"
 for i in $(seq 1 "$RELOADS"); do

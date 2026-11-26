@@ -1,12 +1,12 @@
 #!/bin/bash
-# v0.1 features: cache, whitelist, dryrun, status, stats. Runs inside the dev container.
+# v0.1 features: cache, allowlist, dryrun, status, stats. Runs inside the dev container.
 set -u
 
 . /src/tests/lib.sh
 
 restart() {
     stop_all
-    SETS=${1:-ipset_blacklist sw_bad4 sw_bad6;} MAIN=${2:-} HTTP=${3:-} LOC=${4:-} conf_sets
+    SETS=${1:-ipset_denylist sw_bad4 sw_bad6;} MAIN=${2:-} HTTP=${3:-} LOC=${4:-} conf_sets
     start
 }
 conf_sets() { conf "$SETS"; }
@@ -74,15 +74,23 @@ sleep 1.2
 check "fail open: stale ban still served" is 192.0.2.1 403
 check "fail open: unknown address allowed" is 192.0.2.42 200
 
-echo "== whitelist"
-restart "ipset_whitelist sw_allow4; ipset_blacklist sw_bad4;"
-check "member allowed, even if blacklisted" is 192.0.2.50 200
+echo "== allowlist"
+restart "ipset_allowlist sw_allow4; ipset_denylist sw_bad4;"
+check "member allowed, even if in the denylist" is 192.0.2.50 200
 check "non-member denied" is 192.0.2.51 403
-check "v6 client, v4-only whitelist: denied" is 2001:db8::5 403
+check "v6 client, v4-only allowlist: denied" is 2001:db8::5 403
 check "\$ipset_matched_set = sw_allow4" [ "$(hdr 192.0.2.50)" = "allow sw_allow4" ]
 
+echo "== ipset_blacklist and ipset_whitelist still work"
+restart "ipset_blacklist sw_bad4;"
+check "ipset_blacklist denies" is 192.0.2.1 403
+check "ipset_blacklist allows others" is 192.0.2.2 200
+restart "ipset_whitelist sw_allow4;"
+check "ipset_whitelist allows members" is 192.0.2.50 200
+check "ipset_whitelist denies others" is 192.0.2.51 403
+
 echo "== dryrun, status, per-location off"
-restart "" "" "" "location /dry { ipset_dryrun on; alias $RUN/www/index.html; } location /s503 { ipset_status 503; alias $RUN/www/index.html; } location /s444 { ipset_status 444; alias $RUN/www/index.html; } location /open { ipset_blacklist off; alias $RUN/www/index.html; }"
+restart "" "" "" "location /dry { ipset_dryrun on; alias $RUN/www/index.html; } location /s503 { ipset_status 503; alias $RUN/www/index.html; } location /s444 { ipset_status 444; alias $RUN/www/index.html; } location /open { ipset_denylist off; alias $RUN/www/index.html; }"
 c=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 192.0.2.1' http://127.0.0.1:8080/dry)
 check "dryrun: banned client gets 200 ($c)" [ "$c" = 200 ]
 check "dryrun: \$ipset_result = dryrun" [ "$(hdr 192.0.2.1 /dry)" = "dryrun sw_bad4" ]
@@ -92,15 +100,15 @@ check "ipset_status 503 ($c)" [ "$c" = 503 ]
 c=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 192.0.2.1' http://127.0.0.1:8080/s444)
 check "ipset_status 444 closes the connection ($c)" [ "$c" = 000 ]
 c=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 192.0.2.1' http://127.0.0.1:8080/open)
-check "ipset_blacklist off in a location ($c)" [ "$c" = 200 ]
+check "ipset_denylist off in a location ($c)" [ "$c" = 200 ]
 
 echo "== set types"
-restart "ipset_blacklist sw_bm sw_net4;"
+restart "ipset_denylist sw_bm sw_net4;"
 check "bitmap:ip hit" is 192.0.2.77 403
 check "bitmap:ip miss" is 192.0.2.78 200
 check "hash:net hit" is 198.51.100.200 403
 stop_all
-conf "ipset_blacklist sw_port;"
+conf "ipset_denylist sw_port;"
 $NGINX -c $CONF 2>$RUN/start.err
 check "hash:ip,port rejected at startup" grep -q 'set "sw_port": unsupported set type' $RUN/start.err
 
