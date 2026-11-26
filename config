@@ -1,0 +1,35 @@
+ngx_addon_name=ngx_http_sundew_module
+
+SUNDEW_DEPS="$ngx_addon_dir/src/ngx_sundew.h $ngx_addon_dir/src/sw_proto.h"
+
+if test -n "$ngx_module_link" -a "$ngx_module_link" = DYNAMIC; then
+    ngx_module_type=HTTP
+    ngx_module_name="ngx_http_sundew_module ngx_sundew_core_module"
+    ngx_module_incs="$ngx_addon_dir/src"
+    ngx_module_deps="$SUNDEW_DEPS"
+    ngx_module_srcs="$ngx_addon_dir/src/ngx_http_sundew_module.c \
+                     $ngx_addon_dir/src/ngx_sundew_core_module.c"
+    ngx_module_libs=
+    ngx_module_order="ngx_http_sundew_module ngx_http_realip_module"
+
+    . auto/module
+else
+    ngx_module_type=CORE
+    ngx_module_name=ngx_sundew_core_module
+    ngx_module_incs="$ngx_addon_dir/src"
+    ngx_module_deps="$SUNDEW_DEPS"
+    ngx_module_srcs="$ngx_addon_dir/src/ngx_sundew_core_module.c"
+    ngx_module_libs=
+    ngx_module_order=
+
+    . auto/module
+
+    ngx_module_type=HTTP
+    ngx_module_name=ngx_http_sundew_module
+    ngx_module_incs=
+    ngx_module_deps="$SUNDEW_DEPS"
+    ngx_module_srcs="$ngx_addon_dir/src/ngx_http_sundew_module.c"
+    ngx_module_order="ngx_http_sundew_module ngx_http_realip_module"
+
+    . auto/module
+fi
