@@ -10,7 +10,7 @@ SYS_pidfd_open = 434
 SYS_pidfd_getfd = 438
 libc = ctypes.CDLL(None, use_errno=True)
 
-MAGIC, VERSION, OP_TEST, OP_ADD = 0x5357, 2, 1, 2
+MAGIC, VERSION, OP_TEST, OP_ADD = 0x5357, 3, 1, 2
 
 
 def slot_of(pid):

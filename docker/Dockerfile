@@ -6,7 +6,7 @@ FROM rust:${RUST_VERSION}-slim-trixie AS toolchain
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates curl gdb iproute2 ipset libcap2-bin \
+        build-essential ca-certificates curl gdb iproute2 ipset libcap2-bin nftables \
         libpcre2-dev libssl-dev nghttp2-client openssl procps python3 strace \
         wrk zlib1g-dev \
  && rm -rf /var/lib/apt/lists/* \

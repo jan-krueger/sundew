@@ -16,7 +16,7 @@ VOLUME  := sundew-work-$(NGINX_VERSION)$(FLAVOR)
 RUN      = docker run --rm --init --cap-add NET_ADMIN $(SAN_ENV) \
              -v $(CURDIR):/src:ro -v $(VOLUME):/work $(1) $(IMAGE)
 
-.PHONY: image build unit fmt lint test test-async test-features test-writes test-all test-long test-pid1 release-image test-image bench artifacts docs docs-build docs-site shell clean
+.PHONY: image build unit fmt lint test test-async test-features test-writes test-nft test-all test-long test-pid1 release-image test-image bench artifacts docs docs-build docs-site shell clean
 
 image:
 	docker build -f docker/Dockerfile --target dev \
@@ -48,8 +48,11 @@ test-features: image
 test-writes: image
 	$(call RUN,--cap-add SYS_PTRACE) sh -c '/src/docker/build.sh && /src/tests/writes/run.sh'
 
+test-nft: image
+	$(call RUN,--cap-add SYS_PTRACE) sh -c '/src/docker/build.sh && /src/tests/nft/run.sh'
+
 test-all: image
-	$(call RUN,--cap-add SYS_PTRACE) sh -c '/src/docker/build.sh && /src/tests/lifecycle/run.sh && /src/tests/async/run.sh && /src/tests/features/run.sh && /src/tests/writes/run.sh'
+	$(call RUN,--cap-add SYS_PTRACE) sh -c '/src/docker/build.sh && /src/tests/lifecycle/run.sh && /src/tests/async/run.sh && /src/tests/features/run.sh && /src/tests/writes/run.sh && /src/tests/nft/run.sh'
 
 test-async: image
 	$(call RUN,--cap-add SYS_PTRACE) sh -c '/src/docker/build.sh && /src/tests/async/run.sh'
