@@ -16,17 +16,21 @@ small helper.
 | Process | Account | Capabilities | Can |
 | --- | --- | --- | --- |
 | nginx master | root | as started | Start workers and the helper |
-| nginx worker | your `user` | none, checked at start | Ask the helper about an address and a list of set numbers |
+| nginx worker | your `user` | none, checked at start | Ask the helper about an address and a list of set numbers, or to apply an add rule to an address |
 | sundew-keeper | `sundew` | `CAP_NET_ADMIN` | Restart the engine; reads nothing from workers |
-| sundew-engine | `sundew` | `CAP_NET_ADMIN` | Look up the configured sets, nothing else |
+| sundew-engine | `sundew` | `CAP_NET_ADMIN` | Look up the configured sets, and add to the sets in `sundew_writable_sets` through the configured rules |
 
 ## If an attacker takes over a worker
 
 | They can | They cannot |
 | --- | --- |
-| Ask whether an address is in one of the configured sets | Name any other set: questions carry set numbers the master assigned |
-| Get their own channel closed by sending garbage | Change a set, a firewall rule, a route or an interface: version 0.1 has no code that writes to the kernel |
-| | Signal, trace or read the helper: another account, not dumpable |
+| Ask whether an address is in one of the configured sets | Name any other set: requests carry set and rule numbers the master assigned |
+| Add addresses to the writable sets, through the configured rules | Choose the set, the timeout or the prefix: those come from the rule. Never longer than the rule's timeout |
+| Add up to 20 addresses a second per rule (bursts of 100) | Add more: the helper refuses, and pauses a rule after 1,000 adds in a minute |
+| | Add protected addresses (private, loopback, your `sundew_protect` prefixes), or a prefix that overlaps them |
+| | Remove an address, change a firewall rule, a route or an interface: the helper has no code to delete or to build any other netlink message |
+| | Extend an existing ban: an address already in the set keeps its timeout |
+| Get their own channel closed by sending garbage | Signal, trace or read the helper: another account, not dumpable |
 | | Use the helper's privileges through an inherited file descriptor: the kernel checks the caller too |
 
 ## How the helper is confined
@@ -64,6 +68,11 @@ socket's peer is root.
   in Rust, and its decoders are fuzzed.
 - **Answers are cached.** A change to a set can take
   [`ipset_cache_ttl`](../reference/directives.md#ipset_cache_ttl) to apply.
+- **Bans follow the address nginx sees.** A client who can choose its apparent
+  address, through a wrongly trusted proxy header, can get others banned by a
+  honeypot or a rate limit. The protected list stops the worst case (your own
+  proxies and private networks), and browser requests never trigger a
+  honeypot; see the [honeypot guide](../guides/honeypot.md).
 - **`ipset_fail_open on` is a choice.** Whoever can slow the kernel's ipset
   lock down, for example by making someone list a huge set, gets unknown
   addresses through. Cached bans still apply.

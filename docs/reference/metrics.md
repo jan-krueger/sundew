@@ -16,7 +16,18 @@ them.
 | `sundew_fail_open_total` | `fail_open` | Requests let through because no answer was available |
 | `sundew_fail_closed_total` | `fail_closed` | Requests denied because no answer was available |
 | `sundew_stale_served_total` | `stale_served` | Requests decided by an expired cached answer while no answer was available |
+| `sundew_ratelimited_total` | `ratelimited` | Requests over an `ipset_ratelimit` rate |
+| `sundew_trapped_total` | `trapped` | Requests to an `ipset_autoadd` location |
 | `sundew_set_matched_total{set="…"}` | `sets.<name>.matched` | Requests decided by this set |
+
+## Adds
+
+| Prometheus | JSON | Counts |
+| --- | --- | --- |
+| `sundew_adds_total` | `adds` | Addresses added to a set, or already in it |
+| `sundew_adds_refused_total` | `adds_refused` | Adds the helper refused: protected address, over budget, circuit breaker open |
+| `sundew_adds_failed_total` | `adds_failed` | Adds that failed: kernel error, set full or missing, helper unavailable |
+| `sundew_adds_skipped_total` | `adds_skipped` | Adds not attempted: dry run, browser request, prefetch, TLS early data, `if=`, cross-site rate-limit ban |
 
 ## Cache and helper
 

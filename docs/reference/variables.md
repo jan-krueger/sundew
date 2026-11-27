@@ -2,8 +2,8 @@
 
 | Variable | Value |
 | --- | --- |
-| `$ipset_result` | `allow`, `deny` or `dryrun`. Empty when the request was not checked: no list applies, or it is a subrequest |
-| `$ipset_matched_set` | The set that decided: the denylist set the client is in, or the allowlist set that let it in. Empty otherwise |
+| `$ipset_result` | `allow`, `deny`, `ratelimited` or `dryrun`. Empty when the request was not checked: no Sundew directive applies, or it is a subrequest |
+| `$ipset_matched_set` | The set that decided: the denylist set the client is in, the allowlist set that let it in, or the set an `ipset_autoadd` added it to. Empty otherwise |
 
 Both describe the main request and can be used in any phase after the check,
 for example in logs and headers.

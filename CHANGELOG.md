@@ -6,6 +6,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `ipset_autoadd set ... [timeout=] [status=] [prefix4=] [prefix6=] [if=]`: a
+  honeypot location adds the client to the set of its address family and
+  answers 404. The ban applies from the next request in every worker.
+- `ipset_ratelimit rate=N [window=] [autoban=set[,set]] [ban_time=] [key6=]`:
+  a sliding-window limit per client (per /64 for IPv6) that answers 429 and can
+  ban the client the first time it goes over.
+- `sundew_writable_sets`: the only sets nginx may add to; anything else stops
+  `nginx -t`.
+- `sundew_protect`: addresses never added, on top of a built-in list of
+  private, loopback, link-local and reserved ranges. Prefixes overlapping a
+  protected one are refused too.
+- The helper adds at most 20 addresses a second per rule (bursts of 100) and
+  pauses a rule for 10 minutes after 1,000 adds in a minute.
+- No add for browser requests (`Sec-Fetch-*`, prefetch), TLS early data,
+  `ipset_dryrun`, allowlisted clients, or when `if=` is empty or `0`. A
+  cross-site request gets 429 but no ban.
+- `$ipset_result` value `ratelimited`; counters `ratelimited`, `trapped`,
+  `adds`, `adds_refused`, `adds_failed` and `adds_skipped`.
+- `sundew_ratelimit_zone_size`, 8 MB by default for about 180,000 clients.
+
+### Changed
+- An address already in a set keeps its timeout when added again.
+- Adding to a set without the ipset `timeout` option, or without any timeout,
+  stops nginx with an error instead of creating permanent entries.
+- Module and helper speak protocol 2: install both from the same release.
+
 ## [0.1.0] - 2026-11-26
 
 The first release.

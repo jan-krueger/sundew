@@ -41,6 +41,8 @@ nav:
   - Get started: get-started.md
   - Guides:
       - guides/index.md
+      - Catch scanners with a honeypot: guides/honeypot.md
+      - Rate-limit and ban abusers: guides/rate-limit.md
       - Feed a set from fail2ban: guides/fail2ban.md
       - Behind a CDN or load balancer: guides/behind-a-proxy.md
       - Restrict an admin area: guides/admin-area.md

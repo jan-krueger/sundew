@@ -18,7 +18,12 @@ changes is how it is installed and a few features it does not have yet.
     ```
 
 Install Sundew as in [Get started](../get-started.md), including the `sundew`
-account. Remove any systemd drop-in or `setcap` that gave nginx
+account. If you use `ipset_autoadd` or `ipset_ratelimit autoban=`, list their
+sets at the top level of `nginx.conf`:
+
+```nginx
+sundew_writable_sets honeypot ratelimited;
+``` Remove any systemd drop-in or `setcap` that gave nginx
 `CAP_NET_ADMIN`: Sundew's workers refuse to start with capabilities.
 
 ## 2. Check the directives
@@ -29,8 +34,8 @@ account. Remove any systemd drop-in or `setcap` that gave nginx
 | `ipset_status`, `ipset_fail_open`, `ipset_dryrun`, `ipset_cache_ttl` | Work as before; also allowed in `location` |
 | `ipset_stats`, `ipset_metrics` | Work; the [counters](../reference/metrics.md) have other names (`sundew_…`) |
 | `$ipset_result`, `$ipset_matched_set` | Work; `$ipset_result` is `allow`, `deny` or `dryrun` |
-| `ipset_autoadd` | Not yet: remove it, or keep the trap location and add addresses some other way |
-| `ipset_ratelimit` | Not yet: use nginx's `limit_req`, which runs after Sundew |
+| `ipset_autoadd` | Works; one IPv4 and one IPv6 set can be listed. Needs `sundew_writable_sets` |
+| `ipset_ratelimit` | Works; `autoban=` takes an IPv4 and an IPv6 set. Needs `sundew_writable_sets` for `autoban=` |
 | `ipset_challenge`, `ipset_challenge_difficulty` | Not planned: remove them |
 
 ## 3. Test and reload
@@ -51,3 +56,6 @@ configuration.
 | Privileges | nginx's workers need `CAP_NET_ADMIN` | Workers hold nothing; a sandboxed helper does |
 | Missing set | Lookups fail per request; `ipset_fail_open` decides | The reload is rejected and the old configuration keeps running |
 | While lookups fail | `ipset_fail_open` decides | Cached bans keep applying; others follow `ipset_fail_open` |
+| Adding to sets | — | Only to sets in `sundew_writable_sets`; never private or `sundew_protect` addresses; at most 20 a second per rule |
+| Honeypot hit by a browser | — | Answered, not added (`Sec-Fetch-*`, prefetch) |
+| Repeat offender already banned | — | The ban keeps its original expiry |

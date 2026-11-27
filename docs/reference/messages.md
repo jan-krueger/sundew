@@ -16,6 +16,9 @@ These stop nginx from starting. On a reload, nginx keeps the old configuration.
 | `helper startup failed: sandbox setup failed` | The helper binary is setuid or has file capabilities, or an outer seccomp policy blocks the helper's own sandbox | Reinstall the helper with mode 0755 and no capabilities; allow `seccomp`, `prctl` and `landlock_*` for nginx |
 | `helper startup failed: invalid policy` | Module and helper come from different releases | Install both from the same release |
 | `helper startup failed: unsupported kernel ipset protocol` | The kernel's ipset is older than protocol 6 | Upgrade the kernel |
+| `set "X" is added to (…) but has no timeout support, …` | `X` was created without `timeout`, so added addresses would stay for ever | Recreate it with a timeout: `ipset create X hash:ip timeout 3600` |
+| `set "X" is added to (…) without a timeout, and the set's default timeout is 0 …` | Neither `timeout=`/`ban_time=` nor the set gives a timeout | Add `timeout=` or `ban_time=` |
+| `prefix4= and prefix6= need a hash:net set; …` | A prefix on a `hash:ip` or `bitmap:ip` set would add a whole range of addresses | Use a `hash:net` set, or drop the prefix |
 | `helper user "X" does not exist; …` | No account for the helper | `useradd --system --no-create-home --shell /usr/sbin/nologin sundew`, or set [`sundew_helper_user`](directives.md#sundew_helper_user) |
 | `helper user "X" must differ from the worker user and from root` | The helper would share an account with workers, or be root | Use a dedicated account |
 | `cannot open helper "PATH"` | The helper binary is missing | Install it next to the module, or set [`sundew_helper_path`](directives.md#sundew_helper_path) |
@@ -34,6 +37,10 @@ Configuration mistakes are reported by `nginx -t`:
 
 | Message | Fix |
 | --- | --- |
+| `FILE:LINE adds to set "X", which is not listed in "sundew_writable_sets"` | Add `sundew_writable_sets X;` at the top level of `nginx.conf` |
+| `set "X" is used by ipset_allowlist and is also added to in …` | Use separate sets for allowing and banning |
+| `too many different add rules (max 64)` | Reuse the same set and `timeout=` in more places |
+| `"sundew_protect" has an invalid address or prefix` | Fix the prefix |
 | `invalid set name "X": must be 1-31 characters` | Shorten the name |
 | `invalid character in set name "X"` | Use `A-Z a-z 0-9 _ . : -` |
 | `too many sets (max 64)` | Combine sets, for example into a `hash:net` |
@@ -63,6 +70,17 @@ helper repeats the same message at most once a second.
 | `helper closed this worker's channel after a request that was …` | alert | The worker sent something malformed. Its lookups follow the fail policy until it restarts; a bug, please report it |
 | `helper engine crashed N times in a row; the helper stopped, …` | alert | The engine crashed 6 times, each within a minute of starting. Lookups follow the fail policy and cached bans apply until a reload starts a new helper. Please report it |
 | `Landlock is unavailable, the helper runs with seccomp only` | notice | The kernel has no Landlock (Linux before 5.13, or disabled) |
+| `adding ADDR to set "S" for Ns` | notice | An `ipset_autoadd` location added the client |
+| `banning ADDR in set "S" for Ns (rate limit)` | notice | The client went over an `ipset_ratelimit` rate with `autoban=` |
+| `rate-limited ADDR` | info | 429 sent |
+| `REASON, not adding ADDR to set "S"` | info | An autoadd was skipped: dry run, browser request, prefetch, TLS early data, or `if=` (notice under dry run) |
+| `not banning ADDR: cross-site request` | info | A rate-limit ban was skipped |
+| `helper refused to add a protected address to set "S" (sundew_protect)` | warn | The address, or the prefix to add, overlaps the protected list. Behind a proxy, check `set_real_ip_from` |
+| `helper refused adds to set "S": over 20 per second` | warn | More adds than the budget allows; the rest are dropped until it refills |
+| `more than 1000 adds to set "S" in a minute; adds to it are paused for 10 minutes` | alert | Likely an attack on the honeypot or a misconfiguration: many distinct addresses are being banned |
+| `set "S" is full (maxelem); nothing more can be added` | error | Raise `maxelem` or shorten timeouts |
+| `adding to set "S" failed: kernel error N` | error | The kernel refused the add |
+| `could not ask the helper to add an address: …` | warn | The helper is unavailable or too many requests are in flight |
 | `helper P started (generation G, N slots, M sets)` | notice | A helper started, at start or reload |
 | `draining helper P (generation G, deadline Ds)` | notice | After a reload, the previous helper serves old workers until they exit |
 | `helper P overstayed its drain deadline, killing it` | warn | An old helper did not exit in time |

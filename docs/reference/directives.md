@@ -12,9 +12,14 @@ block that sets one replaces what it inherits; lists are not merged.
 | [`ipset_dryrun`](#ipset_dryrun) | `off` | http, server, location |
 | [`ipset_cache_ttl`](#ipset_cache_ttl) | `60s` | http, server, location |
 | [`sundew_lookup_timeout`](#sundew_lookup_timeout) | `100ms` | http, server, location |
+| [`ipset_autoadd`](#ipset_autoadd) | — | server, location |
+| [`ipset_ratelimit`](#ipset_ratelimit) | — | http, server, location |
 | [`ipset_stats`](#ipset_stats) | — | location |
 | [`ipset_metrics`](#ipset_metrics) | — | location |
+| [`sundew_writable_sets`](#sundew_writable_sets) | — | main |
+| [`sundew_protect`](#sundew_protect) | built-in list | main |
 | [`sundew_cache_size`](#sundew_cache_size) | `16m` | main |
+| [`sundew_ratelimit_zone_size`](#sundew_ratelimit_zone_size) | `8m` | main |
 | [`sundew_helper_path`](#sundew_helper_path) | next to the module | main |
 | [`sundew_helper_user`](#sundew_helper_user) | `sundew` | main |
 | [`sundew_handshake_timeout`](#sundew_handshake_timeout) | `5s` | main |
@@ -131,6 +136,78 @@ How long a request waits for the helper when its answer is not cached. The
 worker serves other requests meanwhile. Past the timeout,
 [`ipset_fail_open`](#ipset_fail_open) applies.
 
+## Writing to sets
+
+Every set Sundew adds to must be listed in
+[`sundew_writable_sets`](#sundew_writable_sets), have the ipset `timeout`
+option, and must not be used by `ipset_allowlist`. The helper never adds an
+address in the [protected list](#sundew_protect), adds at most 20 addresses a
+second per rule (bursts of 100), and pauses a rule for 10 minutes after more
+than 1,000 adds in a minute. An address already in the set keeps its timeout.
+
+### ipset_autoadd
+
+<table class="sw-directive">
+<tr><th>Syntax</th><td><code>ipset_autoadd set ... [timeout=time] [status=code] [prefix4=N] [prefix6=N] [if=value];</code> <br> <code>ipset_autoadd off;</code></td></tr>
+<tr><th>Default</th><td>—</td></tr>
+<tr><th>Context</th><td>server, location</td></tr>
+</table>
+
+Adds the client's address to the set of its address family and answers with
+`status`: a honeypot. List an IPv4 and an IPv6 set to catch both; a client
+whose family has no set listed is answered but not added. On HTTP/1.1 the
+connection is closed after the response.
+
+| Parameter | Default | Effect |
+| --- | --- | --- |
+| `timeout=` | the set's default timeout | How long the address stays in the set, 1 s to 24 days. Required when the set's default is 0 |
+| `status=` | `404` | The response: 400–599, or 444 to close the connection |
+| `prefix4=`, `prefix6=` | `32`, `128` | Add the whole prefix instead of the address. `hash:net` sets only |
+| `if=` | — | Add only when this value is neither empty nor `0`; variables allowed |
+
+The address is not added, but the response is still sent, for:
+
+- requests with any `Sec-Fetch-*` header, or `Sec-Purpose`/`Purpose` asking
+  for a prefetch: browsers, which a page could trick into requesting the trap;
+- TLS early data, which can be replayed;
+- `ipset_dryrun on`, and clients in an `ipset_allowlist`.
+
+```nginx
+location = /wp-login.php {
+    ipset_autoadd scanners scanners6 timeout=1d;
+}
+```
+
+### ipset_ratelimit
+
+<table class="sw-directive">
+<tr><th>Syntax</th><td><code>ipset_ratelimit rate=N [window=time] [autoban=set[,set]] [ban_time=time] [key6=N];</code> <br> <code>ipset_ratelimit off;</code></td></tr>
+<tr><th>Default</th><td>—</td></tr>
+<tr><th>Context</th><td>http, server, location</td></tr>
+</table>
+
+Allows each client `rate` requests per `window`, counted over a sliding window,
+and answers further requests with 429. Clients in an `ipset_allowlist` are not
+counted.
+
+| Parameter | Default | Effect |
+| --- | --- | --- |
+| `rate=` | — | Requests allowed per window, 1–65535 |
+| `window=` | `60s` | 1 s to 1 day |
+| `autoban=` | — | Add the client to this set the first time it goes over the rate. A comma-separated IPv4 and IPv6 set: each client goes to the one of its family |
+| `ban_time=` | `3600s` | How long it stays in the `autoban` set |
+| `key6=` | `64` | IPv6 clients are counted per prefix of this length |
+
+Each `ipset_ratelimit` line keeps its own counters. Requests with
+`Sec-Fetch-Site: cross-site` still get 429 but never cause a ban.
+
+```nginx
+location /api/ {
+    ipset_ratelimit rate=100 window=1m autoban=abusers,abusers6 ban_time=1h;
+    proxy_pass http://backend;
+}
+```
+
 ## Endpoints
 
 ### ipset_stats
@@ -162,6 +239,40 @@ location = /metrics {
 
 ## Helper
 
+### sundew_writable_sets
+
+<table class="sw-directive">
+<tr><th>Syntax</th><td><code>sundew_writable_sets set ...;</code></td></tr>
+<tr><th>Default</th><td>—</td></tr>
+<tr><th>Context</th><td>main</td></tr>
+</table>
+
+The sets that `ipset_autoadd` and `ipset_ratelimit autoban=` may add to. Any
+other set named there stops nginx with an error. On a shared server, an
+included virtual host cannot make nginx write to a set the main configuration
+did not allow.
+
+### sundew_protect
+
+<table class="sw-directive">
+<tr><th>Syntax</th><td><code>sundew_protect prefix ... ;</code></td></tr>
+<tr><th>Default</th><td>built-in list</td></tr>
+<tr><th>Context</th><td>main</td></tr>
+</table>
+
+Addresses the helper never adds to a set. A prefix overlapping a protected one
+is refused too. `!prefix` removes a built-in entry.
+
+Built in: `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`,
+`169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`, `224.0.0.0/4`,
+`240.0.0.0/4`, `::/128`, `::1/128`, `::ffff:0:0/96`, `fc00::/7`, `fe80::/10`,
+`ff00::/8`.
+
+```nginx
+sundew_protect 203.0.113.0/24;      # your CDN or monitoring
+sundew_protect !10.0.0.0/8;         # clients really do come from 10/8
+```
+
 ### sundew_cache_size
 
 <table class="sw-directive">
@@ -172,6 +283,17 @@ location = /metrics {
 
 Shared memory for cached answers, at least `1m`. 16 MB holds about 400,000
 answers; one answer is one address for one set.
+
+### sundew_ratelimit_zone_size
+
+<table class="sw-directive">
+<tr><th>Syntax</th><td><code>sundew_ratelimit_zone_size size;</code></td></tr>
+<tr><th>Default</th><td><code>sundew_ratelimit_zone_size 8m;</code></td></tr>
+<tr><th>Context</th><td>main</td></tr>
+</table>
+
+Shared memory for rate-limit counters, at least `1m`. 8 MB holds about 180,000
+clients; when it is full, the client not seen for longest is forgotten.
 
 ### sundew_helper_path
 
