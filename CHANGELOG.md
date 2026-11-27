@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- nftables sets, written `nft:FAMILY/TABLE/SET` wherever a set goes, for
+  example `ipset_denylist nft:inet/filter/blocklist;`. Lookups work in address
+  sets with and without `flags interval`; `ipset_autoadd` and `autoban=` add to
+  sets with `flags timeout`. ipset and nftables sets mix in one list, and a
+  configuration with only nftables sets does not need the `ip_set` module.
+
+### Changed
+- Module and helper speak protocol 3: install both from the same release.
+
+### Fixed
+- `ipset_ratelimit` let one request too many through when it arrived just
+  after a window boundary.
+
 ## [0.2.0] - 2026-11-28
 
 ### Added

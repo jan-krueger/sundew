@@ -6,8 +6,8 @@ hide:
 
 # Sundew
 
-**Block or allow nginx clients by their address in a Linux ipset, without giving
-nginx any privileges.**
+**Block or allow nginx clients by their address in a Linux ipset or nftables
+set, without giving nginx any privileges.**
 
 ```nginx
 ipset_denylist bad_guys;

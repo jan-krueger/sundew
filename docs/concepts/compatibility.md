@@ -6,10 +6,10 @@ Every change runs the full test suite on each of these:
 
 | | |
 | --- | --- |
-| nginx | 1.24.0, 1.30.8, 1.31.10 |
+| nginx | 1.24.0, 1.26.3, 1.30.8, 1.31.10 |
 | Builds | Normal, and with AddressSanitizer and UndefinedBehaviorSanitizer |
 | Protocols | HTTP/1.1, HTTP/2, HTTP/3 |
-| Set types | `hash:ip`, `hash:net`, `bitmap:ip`, IPv4 and IPv6 |
+| Sets | ipset `hash:ip`, `hash:net`, `bitmap:ip`; nftables address sets, with and without `flags interval`; IPv4 and IPv6 |
 | Linux | 7.2 |
 | Images | nginx.org Debian and Alpine images |
 
@@ -24,6 +24,7 @@ built.
 | Linux | 4.3, untested below 7.2 | Ambient capabilities |
 | | 5.3 for best results | `pidfd_open`: without it nginx tracks the helper by process ID |
 | | 5.13 for best results | Landlock: without it the helper runs with seccomp only |
+| | `ip_set` or `nf_tables` module | For ipset or nftables sets; only the kind in use must be loaded |
 | Architecture | x86_64, aarch64 | The helper's seccomp filter |
 
 ## Not supported

@@ -44,6 +44,7 @@ nav:
       - Catch scanners with a honeypot: guides/honeypot.md
       - Rate-limit and ban abusers: guides/rate-limit.md
       - Feed a set from fail2ban: guides/fail2ban.md
+      - Use nftables sets: guides/nftables.md
       - Behind a CDN or load balancer: guides/behind-a-proxy.md
       - Restrict an admin area: guides/admin-area.md
       - Roll out a new list safely: guides/dry-run.md

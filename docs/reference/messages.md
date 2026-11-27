@@ -10,6 +10,12 @@ These stop nginx from starting. On a reload, nginx keeps the old configuration.
 | --- | --- | --- |
 | `set "X": set does not exist; create it, …` | No set `X` in nginx's network namespace | `ipset create X hash:ip` before nginx starts |
 | `set "X": unsupported set type …` | `X` is not `hash:ip`, `hash:net` or `bitmap:ip` | Use one of those types |
+| `set "nft:…": table or set does not exist; create it, …` | No such nftables table or set, in that family, in nginx's network namespace | Create it before nginx starts; check the family (`ip`, `ip6`, `inet`) |
+| `set "nft:…": nftables unavailable …` | The `nf_tables` kernel module is not loaded | `modprobe nf_tables`; for containers, on the host |
+| `set "nft:…" is not supported: …` | A map, a concatenation, or a key other than an address | Use a set of `type ipv4_addr` or `type ipv6_addr` |
+| `set "nft:…" is added to (…) but has no "flags timeout", …` | Added addresses would stay for ever | Recreate the set with `flags timeout;` |
+| `set "nft:…" is added to (…) but has "flags interval"` | Sundew adds single addresses; interval sets are read-only for it | Ban into a set without `flags interval` |
+| `set "nft:…" is added to (…) but has "flags constant"` | A constant set cannot change | Ban into another set |
 | `set "X": permission denied (CAP_NET_ADMIN missing?)` | The helper may not query sets | See `capability setup failed` |
 | `helper startup failed: netlink unavailable …` | The `ip_set` kernel module is not loaded | `modprobe ip_set`; for containers, on the host |
 | `helper startup failed: capability setup failed` | The helper could not keep `CAP_NET_ADMIN` | Docker: `--cap-add NET_ADMIN`. systemd: `CAP_NET_ADMIN` in `CapabilityBoundingSet=` |
@@ -43,6 +49,7 @@ Configuration mistakes are reported by `nginx -t`:
 | `"sundew_protect" has an invalid address or prefix` | Fix the prefix |
 | `invalid set name "X": must be 1-31 characters` | Shorten the name |
 | `invalid character in set name "X"` | Use `A-Z a-z 0-9 _ . : -` |
+| `invalid nftables set "X": expected "nft:FAMILY/TABLE/SET" …` | See [set names](directives.md#set-names) |
 | `too many sets (max 64)` | Combine sets, for example into a `hash:net` |
 | `invalid status "X": use 4xx, 5xx or 444` | Fix [`ipset_status`](directives.md#ipset_status) |
 | `"sundew_cache_size" must be at least 1m` | Raise [`sundew_cache_size`](directives.md#sundew_cache_size) |
@@ -62,7 +69,7 @@ helper repeats the same message at most once a second.
 | `lookup timed out (req_id N)` | info | The helper did not answer within [`sundew_lookup_timeout`](directives.md#sundew_lookup_timeout) |
 | `helper channel closed; lookups now follow the fail policy` | alert | This worker lost its helper. Cached bans still apply; a reload starts a new helper |
 | `send to helper failed` | error | A question could not be sent; the request follows the fail policy |
-| `set "X" no longer exists; lookups in it fail until it is recreated` | error | The set was destroyed while nginx runs. Requests that need it follow the fail policy; recreate the set |
+| `set "X" no longer exists; lookups in it fail until it is recreated` | error | The set was destroyed while nginx runs. Requests that need it follow the fail policy; recreate the set. For an nftables set this is noticed within 10 seconds |
 | `lookup in set "X" failed: kernel error N` | error | The kernel refused a lookup; the request follows the fail policy |
 | `helper could not query the kernel` | error | Netlink failed (with the system error); the request follows the fail policy |
 | `helper engine was killed by signal N, restarting` | error | The engine crashed and is being restarted. Lookups in flight time out |
@@ -78,7 +85,7 @@ helper repeats the same message at most once a second.
 | `helper refused to add a protected address to set "S" (sundew_protect)` | warn | The address, or the prefix to add, overlaps the protected list. Behind a proxy, check `set_real_ip_from` |
 | `helper refused adds to set "S": over 20 per second` | warn | More adds than the budget allows; the rest are dropped until it refills |
 | `more than 1000 adds to set "S" in a minute; adds to it are paused for 10 minutes` | alert | Likely an attack on the honeypot or a misconfiguration: many distinct addresses are being banned |
-| `set "S" is full (maxelem); nothing more can be added` | error | Raise `maxelem` or shorten timeouts |
+| `set "S" is full; nothing more can be added` | error | Raise the set's `maxelem` (ipset) or `size` (nftables), or shorten timeouts |
 | `adding to set "S" failed: kernel error N` | error | The kernel refused the add |
 | `could not ask the helper to add an address: …` | warn | The helper is unavailable or too many requests are in flight |
 | `helper P started (generation G, N slots, M sets)` | notice | A helper started, at start or reload |

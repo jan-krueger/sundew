@@ -1,9 +1,10 @@
 # Sundew
 
-Kernel ipset access control for nginx, without giving your web server root.
+Kernel ipset and nftables access control for nginx, without giving your web
+server root.
 
 Sundew blocks or allows clients by checking their address against Linux
-ipsets. A set changed by fail2ban, CrowdSec or an admin applies to the next
+ipsets or nftables sets. A set changed by fail2ban, CrowdSec or an admin applies to the next
 request, with no reload. It works behind CDNs and load balancers through
 nginx's `realip` module, for IPv4 and IPv6, over HTTP/1.1, HTTP/2 and HTTP/3.
 

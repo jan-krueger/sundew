@@ -40,14 +40,26 @@ Denies clients whose address is in any of the sets, with
 [`ipset_status`](#ipset_status). `off` cancels an inherited list.
 
 ```nginx
-ipset_denylist f2b-web abuse-nets;
+ipset_denylist f2b-web abuse-nets nft:inet/filter/blocklist;
 ```
 
-- Set types: `hash:ip`, `hash:net`, `bitmap:ip`. Up to 64 sets per
-  configuration; names of 1–31 characters from `A-Z a-z 0-9 _ . : -`.
+- A set is an ipset name, or an nftables set written
+  `nft:FAMILY/TABLE/SET` ([set names](#set-names)). Both kinds can be mixed
+  in one list. Up to 64 sets per configuration.
 - A client is checked against the sets of its own family. `::ffff:192.0.2.1`
   is checked as `192.0.2.1`.
 - Every set must exist when nginx starts or reloads, or the reload is rejected.
+
+#### Set names
+
+| Kind | Written | Supported |
+| --- | --- | --- |
+| ipset | `NAME`, 1–31 characters from `A-Z a-z 0-9 _ . : -` | `hash:ip`, `hash:net`, `bitmap:ip` |
+| nftables | `nft:FAMILY/TABLE/SET`; `FAMILY` is `ip`, `ip6` or `inet`; `TABLE` and `SET` 1–63 characters from `A-Z a-z 0-9 _ . -`, and `SET` may contain `/` | Sets of `type ipv4_addr` or `type ipv6_addr` (or `typeof ip saddr`, `typeof ip6 saddr`), with or without `flags interval`. Not maps or concatenations |
+
+The same string names the set everywhere: in
+[`sundew_writable_sets`](#sundew_writable_sets), in
+[`$ipset_matched_set`](variables.md) and in metrics labels.
 
 ### ipset_allowlist
 
@@ -162,7 +174,7 @@ connection is closed after the response.
 | --- | --- | --- |
 | `timeout=` | the set's default timeout | How long the address stays in the set, 1 s to 24 days. Required when the set's default is 0 |
 | `status=` | `404` | The response: 400–599, or 444 to close the connection |
-| `prefix4=`, `prefix6=` | `32`, `128` | Add the whole prefix instead of the address. `hash:net` sets only |
+| `prefix4=`, `prefix6=` | `32`, `128` | Add the whole prefix instead of the address. ipset `hash:net` sets only |
 | `if=` | — | Add only when this value is neither empty nor `0`; variables allowed |
 
 The address is not added, but the response is still sent, for:
@@ -248,7 +260,9 @@ location = /metrics {
 </table>
 
 The sets that `ipset_autoadd` and `ipset_ratelimit autoban=` may add to. Any
-other set named there stops nginx with an error. On a shared server, an
+other set named there stops nginx with an error. An ipset needs `timeout`
+support; an nftables set needs `flags timeout`, and must not have
+`flags interval` or `flags constant`. On a shared server, an
 included virtual host cannot make nginx write to a set the main configuration
 did not allow.
 

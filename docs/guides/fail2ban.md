@@ -78,3 +78,17 @@ ipset_cache_ttl 5s;
 !!! tip "IPv6"
     A `hash:ip` set holds one address family. Create a second set with
     `family inet6` and list both: `ipset_denylist f2b-web f2b-web6;`.
+
+## With fail2ban's nftables action
+
+fail2ban's stock `nftables` action keeps its bans in nftables sets, in table
+`inet f2b-table`: `addr-set-JAIL` for IPv4 and `addr6-set-JAIL` for IPv6.
+nginx can read those directly:
+
+```nginx
+ipset_denylist nft:inet/f2b-table/addr-set-nginx-http-auth;
+```
+
+fail2ban creates the table and sets when the jail starts, so start fail2ban
+before nginx. The action also adds a firewall rule that drops the banned
+addresses; whether that is wanted alongside nginx's 403 is up to you.
