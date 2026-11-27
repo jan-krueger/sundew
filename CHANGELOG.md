@@ -34,6 +34,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Adding to a set without the ipset `timeout` option, or without any timeout,
   stops nginx with an error instead of creating permanent entries.
 - Module and helper speak protocol 2: install both from the same release.
+- Tarballs for distribution packages name the nginx version they were built
+  for, e.g. `sundew-0.2.0-debian13-nginx1.26.3-amd64.tar.gz`. New nginx
+  versions are added to the latest release once they pass the tests.
 
 ## [0.1.0] - 2026-11-26
 

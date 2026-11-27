@@ -30,18 +30,22 @@ By the end of this page nginx returns 403 to an address you put in a set, and
 
 === "Prebuilt module"
 
-    For nginx from nginx.org's packages, Debian 13 or Ubuntu 24.04. Pick the
-    tarball for your nginx from the
+    For nginx from nginx.org's packages and images, Debian 13 or Ubuntu 24.04.
+    Pick the tarball for your nginx from the
     [latest release](https://github.com/jan-krueger/sundew/releases/latest):
 
-    | `nginx -v` says | Where nginx came from | Tarball |
-    | --- | --- | --- |
-    | `nginx/1.30.8` | nginx.org | `sundew-<version>-nginx.org-1.30.8-<arch>.tar.gz` |
-    | `nginx/1.31.10` | nginx.org | `sundew-<version>-nginx.org-1.31.10-<arch>.tar.gz` |
-    | `nginx/1.26.3` | Debian 13 | `sundew-<version>-debian13-<arch>.tar.gz` |
-    | `nginx/1.24.0 (Ubuntu)` | Ubuntu 24.04 | `sundew-<version>-ubuntu24.04-<arch>.tar.gz` |
+    | Where nginx came from | Tarball |
+    | --- | --- |
+    | nginx.org packages or Debian-based images | `sundew-<version>-nginx.org-<nginx>-<arch>.tar.gz` |
+    | nginx.org Alpine images | `sundew-<version>-nginx.org-<nginx>-alpine-<arch>.tar.gz` |
+    | Debian 13 `nginx` package | `sundew-<version>-debian13-nginx<nginx>-<arch>.tar.gz` |
+    | Ubuntu 24.04 `nginx` package | `sundew-<version>-ubuntu24.04-nginx<nginx>-<arch>.tar.gz` |
 
-    `<arch>` is `amd64` or `arm64`; Alpine has `-alpine` tarballs too.
+    `<nginx>` is the version `nginx -v` prints; the module loads only into that
+    version. `<arch>` is `amd64` or `arm64`. The latest release covers the two
+    newest nginx.org stable and mainline versions and the distributions'
+    current packages; new nginx versions are added to it once they pass the
+    tests.
 
     ```bash
     tar xzf sundew-*.tar.gz && cd sundew-*/

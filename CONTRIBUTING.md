@@ -47,5 +47,9 @@ make test-all NGINX_VERSION=1.24.0
    target and image on amd64 and arm64, and publishes the release with the
    changelog section as its notes.
 
-A new nginx version needs its checksum in `versions.mk` and a line in the
-matrices of `ci.yml` and `release.yml`.
+`release/targets.json` lists the nginx builds Sundew ships for; CI, releases
+and images all take their matrix from it. Every day `nginx-versions.yml` looks
+for new nginx.org releases and distribution packages, pins their checksums in
+`versions.mk`, tests them and opens a pull request. Merging it makes
+`targets.yml` build the new targets from the latest release tag and add them to
+that release. To ship for another distribution, add a target by hand.
