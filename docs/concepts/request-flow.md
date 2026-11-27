@@ -24,36 +24,24 @@ address, before `limit_req` counts the request. Denied clients never use a
 
 The worker does not block while it waits: it sends one 48-byte question and
 goes on serving other connections. Requests for the same address that arrive
-while a question is on its way wait for the same answer: 40 concurrent requests
-for one address make one lookup per worker.
+while a question is on its way wait for the same answer.
 
 --8<-- "request-path.html"
 
 
 ## What it costs
 
-Measured with the release image serving a small static file, the case where
-Sundew's share of the work is largest:
+| Case | Work |
+| --- | --- |
+| Cache hit | A lookup in shared memory, inside the worker |
+| Cache miss | One message to the helper and one kernel lookup per set; the worker serves other requests meanwhile |
+| Kernel busy (another process lists or restores a large set) | The request waits up to [`sundew_lookup_timeout`](../reference/directives.md#sundew_lookup_timeout), then [`ipset_fail_open`](../reference/directives.md#ipset_fail_open) applies |
+| `ipset_ratelimit` | One update of a counter in shared memory |
 
-| Case | Requests/s | Compared with no check |
-| --- | --- | --- |
-| No check (`ipset_denylist off`) | 158,400 | — |
-| Cache hit, allowed | 148,500 | −6% |
-| Cache hit, denied (403) | 256,600 | a 403 is cheaper to send than the page |
-| A new address on every request: every request asks the helper | 100,900 | −36% |
-| The same against a set of 1,000,000 entries | 111,600 | set size does not matter |
-
-nginx 1.30.8, `worker_processes auto` on 12 CPUs (Intel i7-9750H), `wrk -t 4 -c 64`
-for 10 s, median of 3 runs. Reproduce with `make bench`.
-
-- A cache hit is answered inside the worker; misses share one helper, which
-  handles roughly 100,000 lookups a second.
-- Most traffic comes from addresses seen within the last
-  [`ipset_cache_ttl`](../reference/directives.md#ipset_cache_ttl), so real
-  workloads sit close to the cache-hit row.
-- While the kernel is busy (another process lists or restores a large set), a
-  miss waits up to [`sundew_lookup_timeout`](../reference/directives.md#sundew_lookup_timeout);
-  the worker keeps serving other requests.
+Most traffic comes from addresses seen within the last
+[`ipset_cache_ttl`](../reference/directives.md#ipset_cache_ttl), so most
+requests are cache hits. The size of a set does not change the cost of a
+lookup.
 
 After an internal redirect (`index`, `try_files`) the request is checked
 again, which is a cache hit. Subrequests are not checked.

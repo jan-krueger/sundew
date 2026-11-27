@@ -81,9 +81,9 @@ Both can read the same set: the firewall can drop what nginx never needs to see.
     configuration.
 
 !!! success "Fast"
-    Answers are cached in shared memory for all workers: a cache hit costs
-    about 6% of the requests nginx can serve for a static file, and a miss
-    waits for the kernel without blocking the worker.
+    Answers are cached in shared memory for all workers, so most requests are
+    decided without leaving the worker. A miss waits for the kernel without
+    blocking the worker.
 
 !!! success "Safe to operate"
     A reload that names a missing set is rejected and the old configuration

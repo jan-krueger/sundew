@@ -46,15 +46,12 @@ The first release.
   `$ipset_result` and `$ipset_matched_set`.
 - A cache shared by all workers (`ipset_cache_ttl`, default 60 s;
   `sundew_cache_size`, default 16 MB for about 400,000 answers). It survives
-  reloads. Serving a small static file on 12 CPUs, a cache hit costs 6% of
-  the throughput and a request that needs the helper 36%
-  ([`make bench`](bench/run.sh)).
+  reloads.
 - While the helper cannot answer, cached bans keep applying for 10 minutes
   beyond `ipset_cache_ttl`.
 - Requests wait for the helper without blocking the worker, up to
   `sundew_lookup_timeout` (default 100 ms). Concurrent requests for the same
-  address share one lookup: 40 concurrent requests made 2 lookups, one per
-  worker. An answer arriving up to 5 s after the timeout still fills the cache,
+  address share one lookup. An answer arriving up to 5 s after the timeout still fills the cache,
   so a slow kernel is not asked again for the same address.
 - `ipset_stats` (JSON) and `ipset_metrics` (Prometheus) endpoints, with
   counters that survive reloads.
