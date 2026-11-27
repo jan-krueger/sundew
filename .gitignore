@@ -2,3 +2,4 @@ dist/
 .fmt.patch
 helper/target/
 site/
+__pycache__/
