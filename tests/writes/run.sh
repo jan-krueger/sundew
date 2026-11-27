@@ -17,7 +17,8 @@ location = /short { ipset_autoadd sw_trap timeout=2; } \
 location = /net { ipset_autoadd sw_net timeout=60 prefix4=24; } \
 location = /api { ipset_ratelimit rate=5 window=10s autoban=sw_ban,sw_ban6 ban_time=600; alias $IDX; } \
 location = /rl6 { ipset_ratelimit rate=3 window=10s key6=64; alias $IDX; } \
-location = /rl2 { ipset_ratelimit rate=2 window=2s; alias $IDX; }"
+location = /rl2 { ipset_ratelimit rate=2 window=2s; alias $IDX; } \
+location = /rl1 { ipset_ratelimit rate=5 window=1s; alias $IDX; }"
 
 restart() {   # extra main, extra http
     stop_all
@@ -122,6 +123,10 @@ codes=$(for i in 1 2 3; do get 192.0.2.33 /rl2; echo; done | tr '\n' ' ')
 check "rate 2 per 2 s ($codes)" [ "$codes" = "200 200 429 " ]
 sleep 4.2
 check "allowed again after the window" [ "$(get 192.0.2.33 /rl2)" = 200 ]
+for i in 1 2 3; do
+    codes=$(python3 -I /src/tests/writes/boundary.py 192.0.2.4$i)
+    check "no extra request across a window boundary ($codes)" [ "$codes" = "200 200 200 200 200 429" ]
+done
 check "stats: ratelimited" [ "$(stat ratelimited)" -ge 4 ]
 
 echo "== add budget (20/s, burst 100)"
