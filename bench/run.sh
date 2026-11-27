@@ -83,7 +83,6 @@ CASES=(
     "No cache: helper and kernel on every request|/nocache|192.0.2.9"
     "A new address on every request (all misses)|/hit|random"
     "All misses, set of 1,000,000 entries|/big|random"
-    "Cache hit plus ipset_ratelimit, one client|/rl|192.0.2.9"
     "Cache hit plus ipset_ratelimit, many clients|/rl|random"
 )
 
