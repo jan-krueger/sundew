@@ -148,7 +148,9 @@ sw_rl_hit(ngx_shm_zone_t *zone, ngx_uint_t rule, const u_char *key,
 
     e->seen = now_s;
 
-    est = (uint64_t) e->prev * (window - elapsed) / window + e->cur;
+    /* round the previous window's share up: never allow more than rate */
+    est = ((uint64_t) e->prev * (window - elapsed) + window - 1) / window
+          + e->cur;
 
     if (est + 1 > rate) {
         rc = e->banned ? SW_RL_LIMITED : SW_RL_FIRST;
