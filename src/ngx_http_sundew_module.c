@@ -31,6 +31,7 @@
 #define SW_V_DENY_NOT_ALLOWED    4
 
 #define SW_STALE_MS         (600 * 1000)
+#define SW_FAMILY_RULES     4               /* sets per ipset_autoadd / autoban= */
 
 
 typedef struct {
@@ -44,14 +45,18 @@ typedef struct {
     ngx_msec_t   lookup_timeout;
     time_t       cache_ttl;
 
-    ngx_int_t                  autoadd;     /* rule, -1 none */
+    ngx_int_t                  autoadd;     /* rules configured: 1, none: -1 */
+    ngx_int_t                  autoadd_rules[SW_FAMILY_RULES];
+    ngx_uint_t                 autoadd_n;
     ngx_uint_t                 autoadd_status;
     ngx_http_complex_value_t  *autoadd_if;
 
     ngx_int_t                  rl_id;       /* -1 none */
     ngx_uint_t                 rl_rate;
     ngx_msec_t                 rl_window;
-    ngx_int_t                  rl_rule;     /* autoban rule, -1 none */
+    ngx_int_t                  rl_rule;     /* autoban configured: 1, none: -1 */
+    ngx_int_t                  rl_rules[SW_FAMILY_RULES];
+    ngx_uint_t                 rl_n;
     ngx_uint_t                 rl_key6;
 } ngx_http_sundew_loc_conf_t;
 
@@ -597,6 +602,31 @@ ngx_http_sundew_cross_site(ngx_http_request_t *r)
 }
 
 
+/* the rule whose set has the client's family, or -1 */
+
+static ngx_int_t
+ngx_http_sundew_pick_rule(ngx_int_t *rules, ngx_uint_t n, ngx_uint_t family)
+{
+    ngx_uint_t               i, want;
+    ngx_sundew_set_t        *set;
+    ngx_sundew_rule_t       *rule;
+    ngx_sundew_core_conf_t  *scf;
+
+    scf = ngx_http_sundew_core_conf();
+    set = scf->sets.elts;
+    rule = scf->rules.elts;
+    want = (family == 6) ? AF_INET6 : AF_INET;
+
+    for (i = 0; i < n; i++) {
+        if (set[rule[rules[i]].set].family == want) {
+            return rules[i];
+        }
+    }
+
+    return -1;
+}
+
+
 /* rate limit and autoadd, for requests the lists let through */
 
 static ngx_int_t
@@ -604,6 +634,7 @@ ngx_http_sundew_writes(ngx_http_request_t *r,
     ngx_http_sundew_loc_conf_t *slcf, ngx_http_sundew_ctx_t *ctx)
 {
     u_char                   key[16];
+    ngx_int_t                pick;
     ngx_str_t               *name;
     ngx_uint_t               rc, i, bits, level;
     const char              *skip;
@@ -640,8 +671,20 @@ ngx_http_sundew_writes(ngx_http_request_t *r,
                 ctx->result = SW_RES_DRYRUN;
 
             } else {
-                if (rc == SW_RL_FIRST && slcf->rl_rule >= 0) {
-                    name = &set[rule[slcf->rl_rule].set].name;
+                pick = (slcf->rl_rule >= 0)
+                       ? ngx_http_sundew_pick_rule(slcf->rl_rules, slcf->rl_n,
+                                                   ctx->family)
+                       : -1;
+
+                if (rc == SW_RL_FIRST && slcf->rl_rule >= 0 && pick < 0) {
+                    sw_stats_inc(SW_STAT_ADDS_SKIPPED);
+                    ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                                  "sundew: not banning %V: no autoban= set "
+                                  "for its address family",
+                                  &r->connection->addr_text);
+
+                } else if (rc == SW_RL_FIRST && pick >= 0) {
+                    name = &set[rule[pick].set].name;
 
                     if (ngx_http_sundew_cross_site(r)) {
                         sw_stats_inc(SW_STAT_ADDS_SKIPPED);
@@ -654,8 +697,8 @@ ngx_http_sundew_writes(ngx_http_request_t *r,
                                       "sundew: banning %V in set \"%V\" "
                                       "for %uis (rate limit)",
                                       &r->connection->addr_text, name,
-                                      rule[slcf->rl_rule].timeout);
-                        sw_client_add(slcf->rl_rule, ctx->family, ctx->addr);
+                                      rule[pick].timeout);
+                        sw_client_add(pick, ctx->family, ctx->addr);
                     }
                 }
 
@@ -672,22 +715,30 @@ ngx_http_sundew_writes(ngx_http_request_t *r,
     if (slcf->autoadd >= 0) {
         sw_stats_inc(SW_STAT_TRAPPED);
 
-        name = &set[rule[slcf->autoadd].set].name;
+        pick = ngx_http_sundew_pick_rule(slcf->autoadd_rules, slcf->autoadd_n,
+                                         ctx->family);
         skip = ngx_http_sundew_skip_add(r, slcf);
 
-        if (skip) {
+        if (pick < 0) {
+            sw_stats_inc(SW_STAT_ADDS_SKIPPED);
+            ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                          "sundew: no ipset_autoadd set for the address "
+                          "family of %V", &r->connection->addr_text);
+
+        } else if (skip) {
             sw_stats_inc(SW_STAT_ADDS_SKIPPED);
             level = slcf->dryrun ? NGX_LOG_NOTICE : NGX_LOG_INFO;
             ngx_log_error(level, r->connection->log, 0,
                           "sundew: %s, not adding %V to set \"%V\"",
-                          skip, &r->connection->addr_text, name);
+                          skip, &r->connection->addr_text,
+                          &set[rule[pick].set].name);
 
         } else {
             ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0,
                           "sundew: adding %V to set \"%V\" for %uis",
-                          &r->connection->addr_text, name,
-                          rule[slcf->autoadd].timeout);
-            sw_client_add(slcf->autoadd, ctx->family, ctx->addr);
+                          &r->connection->addr_text,
+                          &set[rule[pick].set].name, rule[pick].timeout);
+            sw_client_add(pick, ctx->family, ctx->addr);
         }
 
         if (slcf->dryrun) {
@@ -696,7 +747,7 @@ ngx_http_sundew_writes(ngx_http_request_t *r,
         }
 
         ctx->result = SW_RES_DENY;
-        ctx->matched_set = rule[slcf->autoadd].set;
+        ctx->matched_set = (pick >= 0) ? (ngx_int_t) rule[pick].set : -1;
         r->keepalive = 0;
 
         return slcf->autoadd_status;
@@ -1111,6 +1162,9 @@ ngx_http_sundew_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
     if (conf->autoadd == NGX_CONF_UNSET) {
         conf->autoadd = (prev->autoadd == NGX_CONF_UNSET) ? -1 : prev->autoadd;
+        ngx_memcpy(conf->autoadd_rules, prev->autoadd_rules,
+                   sizeof(conf->autoadd_rules));
+        conf->autoadd_n = prev->autoadd_n;
         conf->autoadd_status = prev->autoadd_status;
         conf->autoadd_if = prev->autoadd_if;
     }
@@ -1120,6 +1174,8 @@ ngx_http_sundew_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         conf->rl_rate = prev->rl_rate;
         conf->rl_window = prev->rl_window;
         conf->rl_rule = prev->rl_rule;
+        ngx_memcpy(conf->rl_rules, prev->rl_rules, sizeof(conf->rl_rules));
+        conf->rl_n = prev->rl_n;
         conf->rl_key6 = prev->rl_key6;
     }
 
@@ -1249,8 +1305,8 @@ ngx_http_sundew_autoadd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_http_sundew_loc_conf_t *slcf = conf;
 
     ngx_int_t                          n, rule;
-    ngx_str_t                         *value, v;
-    ngx_uint_t                         i, timeout, prefix4, prefix6;
+    ngx_str_t                         *value, v, sets[SW_FAMILY_RULES];
+    ngx_uint_t                         i, nsets, timeout, prefix4, prefix6;
     ngx_http_compile_complex_value_t   ccv;
 
     if (slcf->autoadd != NGX_CONF_UNSET) {
@@ -1267,9 +1323,21 @@ ngx_http_sundew_autoadd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     timeout = 0;
     prefix4 = 32;
     prefix6 = 128;
+    nsets = 0;
     slcf->autoadd_status = NGX_HTTP_NOT_FOUND;
 
-    for (i = 2; i < cf->args->nelts; i++) {
+    for (i = 1; i < cf->args->nelts; i++) {
+
+        if (ngx_strlchr(value[i].data, value[i].data + value[i].len, '=')
+            == NULL)
+        {
+            if (nsets == SW_FAMILY_RULES) {
+                return "has too many sets";
+            }
+
+            sets[nsets++] = value[i];
+            continue;
+        }
 
         if (ngx_strncmp(value[i].data, "timeout=", 8) == 0) {
             v.data = value[i].data + 8;
@@ -1345,12 +1413,21 @@ ngx_http_sundew_autoadd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return NGX_CONF_ERROR;
     }
 
-    rule = ngx_sundew_add_rule(cf, &value[1], prefix4, prefix6, timeout);
-    if (rule == NGX_ERROR) {
-        return NGX_CONF_ERROR;
+    if (nsets == 0) {
+        return "needs a set";
     }
 
-    slcf->autoadd = rule;
+    for (i = 0; i < nsets; i++) {
+        rule = ngx_sundew_add_rule(cf, &sets[i], prefix4, prefix6, timeout);
+        if (rule == NGX_ERROR) {
+            return NGX_CONF_ERROR;
+        }
+
+        slcf->autoadd_rules[i] = rule;
+    }
+
+    slcf->autoadd_n = nsets;
+    slcf->autoadd = 1;
 
     return NGX_CONF_OK;
 }
@@ -1361,8 +1438,9 @@ ngx_http_sundew_ratelimit(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_sundew_loc_conf_t *slcf = conf;
 
+    u_char            *p, *last, *comma;
     ngx_int_t          n, rule;
-    ngx_str_t         *value, v, set;
+    ngx_str_t         *value, v, set, one;
     ngx_uint_t         i, ban_time;
     ngx_msec_t         ms;
     static ngx_uint_t  next_id;
@@ -1446,13 +1524,28 @@ ngx_http_sundew_ratelimit(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return "needs rate=";
     }
 
-    if (set.len) {
-        rule = ngx_sundew_add_rule(cf, &set, 32, 128, ban_time);
+    slcf->rl_n = 0;
+
+    for (p = set.data, last = set.data + set.len; p < last; p = comma + 1) {
+        comma = ngx_strlchr(p, last, ',');
+        if (comma == NULL) {
+            comma = last;
+        }
+
+        one.data = p;
+        one.len = comma - p;
+
+        if (slcf->rl_n == SW_FAMILY_RULES) {
+            return "has too many autoban= sets";
+        }
+
+        rule = ngx_sundew_add_rule(cf, &one, 32, 128, ban_time);
         if (rule == NGX_ERROR) {
             return NGX_CONF_ERROR;
         }
 
-        slcf->rl_rule = rule;
+        slcf->rl_rules[slcf->rl_n++] = rule;
+        slcf->rl_rule = 1;
     }
 
     if (ngx_sundew_ratelimit_zone(cf) == NULL) {
