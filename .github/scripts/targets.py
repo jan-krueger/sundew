@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -183,12 +184,27 @@ def update():
             f.write(f"new_versions={' '.join(new)}\n")
 
 
-def missing(tag):
+def api(path):
     repo = os.environ["GITHUB_REPOSITORY"]
-    req = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases/tags/{tag}",
+    req = urllib.request.Request(f"https://api.github.com/repos/{repo}/{path}",
                                  headers={**UA, "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}"})
     with urllib.request.urlopen(req, timeout=60) as r:
-        assets = {a["name"] for a in json.load(r)["assets"]}
+        return json.load(r)
+
+
+def missing(tag):
+    release = api(f"releases/tags/{tag}")
+    if release.get("immutable"):
+        print(f"::notice::{tag} is immutable; assets cannot be added", file=sys.stderr)
+        return []
+    try:
+        api(f"contents/release/targets.json?ref={tag}")
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        print(f"::notice::{tag} predates release/targets.json", file=sys.stderr)
+        return []
+    assets = {a["name"] for a in release["assets"]}
     version = tag.lstrip("v")
     return [t for t in matrix("release")
             if any(f"sundew-{version}-{t['name']}-{arch}.tar.gz" not in assets for arch in ("amd64", "arm64"))]
