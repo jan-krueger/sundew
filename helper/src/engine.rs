@@ -12,11 +12,23 @@ enum SetType {
     BitmapIp,
 }
 
+enum Backend {
+    Ipset {
+        kind: SetType,
+        netmask: u8,
+    },
+    Nft {
+        family: u8, // table family
+        table: Vec<u8>,
+        /// last time the set was seen to exist
+        checked_ms: u64,
+    },
+}
+
 struct SetInfo {
     name: Vec<u8>,
-    family: u8, // NFPROTO_*, 0 = unusable
-    kind: SetType,
-    netmask: u8,
+    family: u8, // address family NFPROTO_IPV4/6, 0 = unusable
+    backend: Backend,
     default_timeout: u32,
 }
 
@@ -51,6 +63,8 @@ const NL_TIMEOUT_MS: i32 = 1000;
 const RECENT_MS: u64 = 10_000;
 const BREAKER_PER_MINUTE: u32 = 1000;
 const BREAKER_PAUSE_MS: u64 = 600_000;
+/// nft lookups answer -ENOENT for a missing set too
+const NFT_RECHECK_MS: u64 = 10_000;
 
 fn addr_bytes(addr: &Addr) -> ([u8; 16], bool) {
     match addr {
@@ -101,7 +115,7 @@ impl Engine {
     fn transact(
         &mut self,
         msgs: &[(u32, Vec<u8>)],
-        mut on_data: impl FnMut(u32, u16, &[u8]),
+        mut on_data: impl FnMut(u16, u16, &[u8]),
     ) -> Result<Vec<i32>, i32> {
         let errno = |e: std::io::Error| e.raw_os_error().unwrap_or(libc::EIO);
         for (_, m) in msgs {
@@ -139,8 +153,8 @@ impl Engine {
                 let (seq, code) = match r {
                     Reply::Ack { seq, errno } => (seq, errno),
                     Reply::Done { seq } => (seq, 0),
-                    Reply::Data { seq, cmd, attrs } => {
-                        on_data(seq, cmd, attrs);
+                    Reply::Data { subsys, cmd, attrs } => {
+                        on_data(subsys, cmd, attrs);
                         continue;
                     }
                 };
@@ -158,8 +172,8 @@ impl Engine {
     fn negotiate(&mut self) -> (u8, u8) {
         let seq = self.next_seq();
         let (mut kmin, mut kmax) = (0u8, 0u8);
-        let r = self.transact(&[(seq, nl::msg_protocol(seq))], |_, cmd, attrs| {
-            if cmd != nl::IPSET_CMD_PROTOCOL {
+        let r = self.transact(&[(seq, nl::msg_protocol(seq))], |sub, cmd, attrs| {
+            if sub != nl::NFNL_SUBSYS_IPSET || cmd != nl::IPSET_CMD_PROTOCOL {
                 return;
             }
             for (ty, v) in nl::attrs(attrs).flatten() {
@@ -191,8 +205,8 @@ impl Engine {
         let mut rs = ReadySet::default();
         let mut messages = 0;
         let msg = nl::msg_list_header(seq, self.proto, name);
-        let r = self.transact(&[(seq, msg)], |_, cmd, attrs| {
-            if cmd != nl::IPSET_CMD_LIST {
+        let r = self.transact(&[(seq, msg)], |sub, cmd, attrs| {
+            if sub != nl::NFNL_SUBSYS_IPSET || cmd != nl::IPSET_CMD_LIST {
                 return;
             }
             messages += 1;
@@ -243,6 +257,72 @@ impl Engine {
         (rs, kind)
     }
 
+    /// Flags, key and default timeout of one nft set (GETSET).
+    fn describe_nft(
+        &mut self,
+        family: u8,
+        table: &[u8],
+        name: &[u8],
+        role: u8,
+    ) -> (ReadySet, bool) {
+        let seq = self.next_seq();
+        let (mut flags, mut ktype, mut klen, mut map, mut timeout_ms, mut messages) =
+            (0u32, 0u32, 0u32, false, 0u64, 0);
+        let msg = nl::msg_nft_getset(seq, family, table, name);
+        let be32 = |v: &[u8]| v.try_into().map(u32::from_be_bytes).unwrap_or(u32::MAX);
+        let r = self.transact(&[(seq, msg)], |sub, cmd, attrs| {
+            if sub != nl::NFNL_SUBSYS_NFTABLES || cmd != nl::NFT_MSG_NEWSET {
+                return;
+            }
+            messages += 1;
+            for (ty, v) in nl::attrs(attrs).flatten() {
+                match ty {
+                    nl::NFTA_SET_FLAGS => flags = be32(v),
+                    nl::NFTA_SET_KEY_TYPE => ktype = be32(v),
+                    nl::NFTA_SET_KEY_LEN => klen = be32(v),
+                    nl::NFTA_SET_DATA_TYPE => map = true,
+                    nl::NFTA_SET_TIMEOUT => {
+                        timeout_ms = v.try_into().map(u64::from_be_bytes).unwrap_or(0)
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let mut rs = ReadySet {
+            err: match r {
+                Ok(v) => v[0],
+                Err(e) => -e,
+            },
+            ..ReadySet::default()
+        };
+        if rs.err == 0 && messages != 1 {
+            rs.err = -libc::EPROTO;
+        }
+        if rs.err != 0 {
+            return (rs, false);
+        }
+        let interval = flags & nl::NFT_SET_INTERVAL != 0;
+        rs.family = match (ktype, klen) {
+            (nl::NFT_TYPE_IPADDR, 4) => nl::NFPROTO_IPV4,
+            (nl::NFT_TYPE_IP6ADDR, 16) => nl::NFPROTO_IPV6,
+            _ => 0,
+        };
+        let tn: &[u8] = if interval { b"nft interval" } else { b"nft" };
+        rs.type_name[..tn.len()].copy_from_slice(tn);
+        rs.has_timeout = flags & nl::NFT_SET_TIMEOUT != 0;
+        rs.default_timeout = timeout_ms.div_ceil(1000).min(proto::MAX_TIMEOUT as u64) as u32;
+        let unsupported =
+            nl::NFT_SET_ANONYMOUS | nl::NFT_SET_MAP | nl::NFT_SET_OBJECT | nl::NFT_SET_CONCAT;
+        if rs.family == 0 || map || flags & unsupported != 0 {
+            rs.err = proto::SETERR_NFT_KEY;
+        } else if role & proto::ROLE_ADD != 0 && interval {
+            rs.err = proto::SETERR_NFT_INTERVAL;
+        } else if role & proto::ROLE_ADD != 0 && flags & nl::NFT_SET_CONSTANT != 0 {
+            rs.err = proto::SETERR_NFT_CONSTANT;
+        }
+        (rs, interval)
+    }
+
     /// (status, decided, matched); problems are logged to `fd`.
     fn test(&mut self, fd: i32, mask: u64, addr: &Addr) -> (u8, u64, u64) {
         let mut msgs = Vec::new();
@@ -250,7 +330,13 @@ impl Engine {
         for i in 0..self.sets.len() {
             if mask & (1u64 << i) != 0 {
                 let seq = self.next_seq();
-                let m = nl::msg_test(seq, self.proto, &self.sets[i].name, addr);
+                let set = &self.sets[i];
+                let m = match &set.backend {
+                    Backend::Ipset { .. } => nl::msg_test(seq, self.proto, &set.name, addr),
+                    Backend::Nft { family, table, .. } => {
+                        nl::msg_nft_get(seq, *family, table, &set.name, addr_slice(addr))
+                    }
+                };
                 msgs.push((seq, m));
                 idx.push(i);
             }
@@ -263,14 +349,27 @@ impl Engine {
             }
         };
         let (mut decided, mut matched) = (0u64, 0u64);
+        let now = sys::monotonic_ms();
         for (k, errno) in res.into_iter().enumerate() {
             let b = 1u64 << idx[k];
+            let nft = match self.sets[idx[k]].backend {
+                Backend::Nft { checked_ms, .. } => Some(checked_ms),
+                Backend::Ipset { .. } => None,
+            };
             match errno {
                 0 => {
                     decided |= b;
                     matched |= b;
                 }
-                e if e == -nl::IPSET_ERR_EXIST => decided |= b,
+                e if nft.is_none() && e == -nl::IPSET_ERR_EXIST => decided |= b,
+                e if e == -libc::ENOENT
+                    && nft.is_some_and(|t| now.saturating_sub(t) < NFT_RECHECK_MS) =>
+                {
+                    decided |= b
+                }
+                e if e == -libc::ENOENT && nft.is_some() && self.nft_exists(idx[k], now) => {
+                    decided |= b
+                }
                 e if e == -libc::ENOENT => {
                     self.log(fd, proto::LVL_ERR, proto::LOG_SET_MISSING, idx[k] as u64)
                 }
@@ -283,6 +382,29 @@ impl Engine {
             }
         }
         (proto::ST_OK, decided, matched)
+    }
+
+    /// Re-check after -ENOENT that an nft set still exists and fits.
+    fn nft_exists(&mut self, i: usize, now: u64) -> bool {
+        let Backend::Nft {
+            family, ref table, ..
+        } = self.sets[i].backend
+        else {
+            return false;
+        };
+        let (table, name, want) = (
+            table.clone(),
+            self.sets[i].name.clone(),
+            self.sets[i].family,
+        );
+        let (rs, _) = self.describe_nft(family, &table, &name, proto::ROLE_LOOKUP);
+        let ok = rs.err == 0 && rs.family == want;
+        if ok {
+            if let Backend::Nft { checked_ms, .. } = &mut self.sets[i].backend {
+                *checked_ms = now;
+            }
+        }
+        ok
     }
 
     fn mask_valid(&self, mask: u64, addr: &Addr) -> bool {
@@ -335,12 +457,18 @@ impl Engine {
         let set = &self.sets[rule.set];
         let (mut elem, v6) = addr_bytes(addr);
         let host = if v6 { 128 } else { 32 };
-        let (prefix, cidr) = match set.kind {
-            SetType::HashNet => {
+        let (prefix, cidr) = match set.backend {
+            Backend::Ipset {
+                kind: SetType::HashNet,
+                ..
+            } => {
                 let p = if v6 { rule.prefix6 } else { rule.prefix4 };
                 (p, (p < host).then_some(p))
             }
-            SetType::HashIp if set.netmask != 0 => (set.netmask.min(host), None),
+            Backend::Ipset {
+                kind: SetType::HashIp,
+                netmask,
+            } if netmask != 0 => (netmask.min(host), None),
             _ => (host, None),
         };
         mask(&mut elem, prefix);
@@ -373,14 +501,25 @@ impl Engine {
             Addr::V4([elem[0], elem[1], elem[2], elem[3]])
         };
         let seq = self.next_seq();
-        let msg = nl::msg_add(
-            seq,
-            self.proto,
-            &self.sets[set_idx].name,
-            &target,
-            cidr,
-            timeout,
-        );
+        let set = &self.sets[set_idx];
+        let nft = matches!(set.backend, Backend::Nft { .. });
+        let msg = match &set.backend {
+            Backend::Ipset { .. } => {
+                nl::msg_add(seq, self.proto, &set.name, &target, cidr, timeout)
+            }
+            Backend::Nft { family, table, .. } => {
+                // the batch around it takes the sequence numbers either side
+                self.seq = self.seq.wrapping_add(1);
+                nl::msg_nft_add(
+                    seq,
+                    *family,
+                    table,
+                    &set.name,
+                    addr_slice(&target),
+                    timeout as u64 * 1000,
+                )
+            }
+        };
         let res = match self.transact(&[(seq, msg)], |_, _, _| {}) {
             Ok(v) => v[0],
             Err(errno) => {
@@ -388,14 +527,19 @@ impl Engine {
                 return (proto::ST_ERROR, 0);
             }
         };
+        let (exist, full) = if nft {
+            (-libc::EEXIST, -libc::ENFILE)
+        } else {
+            (-nl::IPSET_ERR_EXIST, -nl::IPSET_ERR_HASH_FULL)
+        };
         match res {
             0 => {}
-            e if e == -nl::IPSET_ERR_EXIST => {}
+            e if e == exist => {}
             e if e == -libc::ENOENT => {
                 self.log(fd, proto::LVL_ERR, proto::LOG_SET_MISSING, set_idx as u64);
                 return (proto::ST_SET_MISSING, 0);
             }
-            e if e == -nl::IPSET_ERR_HASH_FULL => {
+            e if e == full => {
                 self.log(fd, proto::LVL_ERR, proto::LOG_SET_FULL, set_idx as u64);
                 return (proto::ST_ERROR, 0);
             }
@@ -416,6 +560,13 @@ impl Engine {
         }
         self.recent.insert((r, elem), now);
         (proto::ST_OK, 1)
+    }
+}
+
+fn addr_slice(addr: &Addr) -> &[u8] {
+    match addr {
+        Addr::V4(a) => a,
+        Addr::V6(a) => a,
     }
 }
 
@@ -541,26 +692,49 @@ pub fn run(restarted: bool) -> ! {
         draining: false,
         rbuf: vec![0u8; 65536],
     };
-    let (kmin, kmax) = eng.negotiate();
+    // nft-only configurations work without the ip_set module
+    let (kmin, kmax) = if policy
+        .sets
+        .iter()
+        .any(|s| s.backend == proto::BACKEND_IPSET)
+    {
+        eng.negotiate()
+    } else {
+        (0, 0)
+    };
     eng.proto = kmax.min(nl::IPSET_PROTOCOL);
 
     let mut ready = Vec::new();
+    let now = sys::monotonic_ms();
     for s in &policy.sets {
-        let (mut rs, kind) = eng.describe(&s.name);
+        let (mut rs, backend) = if s.backend == proto::BACKEND_NFT {
+            let (rs, _) = eng.describe_nft(s.family, &s.table, &s.name, s.role);
+            let b = Backend::Nft {
+                family: s.family,
+                table: s.table.clone(),
+                checked_ms: now,
+            };
+            (rs, b)
+        } else {
+            let (rs, kind) = eng.describe(&s.name);
+            let b = Backend::Ipset {
+                kind: kind.unwrap_or(SetType::HashIp),
+                netmask: rs.netmask,
+            };
+            (rs, b)
+        };
         if rs.err == 0 && s.role & proto::ROLE_ADD != 0 && !rs.has_timeout {
             rs.err = proto::SETERR_NO_TIMEOUT;
         }
         eng.sets.push(SetInfo {
             name: s.name.clone(),
             family: if rs.err == 0 { rs.family } else { 0 },
-            kind: kind.unwrap_or(SetType::HashIp),
-            netmask: rs.netmask,
+            backend,
             default_timeout: rs.default_timeout,
         });
         ready.push(rs);
     }
 
-    let now = sys::monotonic_ms();
     for r in &policy.rules {
         let set = &eng.sets[r.set];
         let timeout = if r.timeout != 0 {

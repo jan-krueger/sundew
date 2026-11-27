@@ -42,7 +42,7 @@ enum {
 
 
 typedef struct {
-    u_char        name[SW_SETNAME_LEN];
+    u_char        name[SW_SETREF_LEN];
     ngx_atomic_t  matched;
 } sw_stats_set_t;
 

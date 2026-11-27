@@ -16,8 +16,12 @@
 
 
 typedef struct {
-    ngx_str_t                name;
+    ngx_str_t                name;          /* as configured */
     ngx_uint_t               role;
+    ngx_uint_t               backend;       /* SW_BACKEND_* */
+    ngx_uint_t               nft_family;    /* SW_NFPROTO_* */
+    ngx_str_t                table;         /* nft only */
+    ngx_str_t                set;           /* name in the kernel */
     /* from READY */
     ngx_uint_t               family;        /* AF_INET / AF_INET6 */
     ngx_uint_t               revision;

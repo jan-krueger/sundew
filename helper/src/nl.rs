@@ -1,6 +1,42 @@
-//! nfnetlink / ipset codec.
+//! nfnetlink codec: ipset and nf_tables sets.
 
 pub const NFNL_SUBSYS_IPSET: u16 = 6;
+pub const NFNL_SUBSYS_NFTABLES: u16 = 10;
+const NFNL_MSG_BATCH_BEGIN: u16 = 0x10;
+const NFNL_MSG_BATCH_END: u16 = 0x11;
+
+pub const NFT_MSG_NEWSET: u16 = 9;
+const NFT_MSG_GETSET: u16 = 10;
+const NFT_MSG_NEWSETELEM: u16 = 12;
+const NFT_MSG_GETSETELEM: u16 = 13;
+
+const NFTA_SET_TABLE: u16 = 1;
+const NFTA_SET_NAME: u16 = 2;
+pub const NFTA_SET_FLAGS: u16 = 3;
+pub const NFTA_SET_KEY_TYPE: u16 = 4;
+pub const NFTA_SET_KEY_LEN: u16 = 5;
+pub const NFTA_SET_DATA_TYPE: u16 = 6;
+pub const NFTA_SET_TIMEOUT: u16 = 11;
+
+pub const NFT_SET_ANONYMOUS: u32 = 0x1;
+pub const NFT_SET_CONSTANT: u32 = 0x2;
+pub const NFT_SET_INTERVAL: u32 = 0x4;
+pub const NFT_SET_MAP: u32 = 0x8;
+pub const NFT_SET_TIMEOUT: u32 = 0x10;
+pub const NFT_SET_OBJECT: u32 = 0x40;
+pub const NFT_SET_CONCAT: u32 = 0x80;
+
+/// nft datatypes ipv4_addr and ipv6_addr
+pub const NFT_TYPE_IPADDR: u32 = 7;
+pub const NFT_TYPE_IP6ADDR: u32 = 8;
+
+const NFTA_SET_ELEM_LIST_TABLE: u16 = 1;
+const NFTA_SET_ELEM_LIST_SET: u16 = 2;
+const NFTA_SET_ELEM_LIST_ELEMENTS: u16 = 3;
+const NFTA_LIST_ELEM: u16 = 1;
+const NFTA_SET_ELEM_KEY: u16 = 1;
+const NFTA_SET_ELEM_TIMEOUT: u16 = 4;
+const NFTA_DATA_VALUE: u16 = 1;
 
 pub const IPSET_PROTOCOL: u8 = 7;
 pub const IPSET_PROTOCOL_MIN: u8 = 6;
@@ -38,6 +74,7 @@ const NLA_TYPE_MASK: u16 = !(NLA_F_NESTED | NLA_F_NET_BYTEORDER);
 pub const NLM_F_REQUEST: u16 = 0x1;
 pub const NLM_F_ACK: u16 = 0x4;
 pub const NLM_F_EXCL: u16 = 0x200;
+pub const NLM_F_CREATE: u16 = 0x400;
 pub const NLM_F_DUMP: u16 = 0x300;
 
 pub const NLMSG_ERROR: u16 = 2;
@@ -60,15 +97,23 @@ pub struct Builder {
 
 impl Builder {
     pub fn new(cmd: u16, flags: u16, seq: u32, family: u8) -> Builder {
+        Builder::raw((NFNL_SUBSYS_IPSET << 8) | cmd, flags, seq, family, 0)
+    }
+
+    pub fn nft(cmd: u16, flags: u16, seq: u32, family: u8) -> Builder {
+        Builder::raw((NFNL_SUBSYS_NFTABLES << 8) | cmd, flags, seq, family, 0)
+    }
+
+    fn raw(ty: u16, flags: u16, seq: u32, family: u8, res_id: u16) -> Builder {
         let mut buf = Vec::with_capacity(128);
         buf.extend_from_slice(&0u32.to_ne_bytes()); // len
-        buf.extend_from_slice(&((NFNL_SUBSYS_IPSET << 8) | cmd).to_ne_bytes());
+        buf.extend_from_slice(&ty.to_ne_bytes());
         buf.extend_from_slice(&flags.to_ne_bytes());
         buf.extend_from_slice(&seq.to_ne_bytes());
         buf.extend_from_slice(&0u32.to_ne_bytes()); // portid
         buf.push(family);
         buf.push(0); // NFNETLINK_V0
-        buf.extend_from_slice(&0u16.to_be_bytes()); // res_id
+        buf.extend_from_slice(&res_id.to_be_bytes());
         Builder {
             buf,
             nests: Vec::new(),
@@ -200,11 +245,87 @@ pub fn msg_test(seq: u32, proto: u8, set: &[u8], addr: &crate::proto::Addr) -> V
     b.finish()
 }
 
+/// nft set: flags, key type and length, default timeout in ms.
+pub fn msg_nft_getset(seq: u32, family: u8, table: &[u8], set: &[u8]) -> Vec<u8> {
+    let mut b = Builder::nft(NFT_MSG_GETSET, NLM_F_REQUEST | NLM_F_ACK, seq, family);
+    b.attr_str(NFTA_SET_TABLE, table)
+        .attr_str(NFTA_SET_NAME, set);
+    b.finish()
+}
+
+fn nft_elem(b: &mut Builder, table: &[u8], set: &[u8], key: &[u8], timeout_ms: Option<u64>) {
+    b.attr_str(NFTA_SET_ELEM_LIST_TABLE, table)
+        .attr_str(NFTA_SET_ELEM_LIST_SET, set)
+        .nest(NFTA_SET_ELEM_LIST_ELEMENTS)
+        .nest(NFTA_LIST_ELEM)
+        .nest(NFTA_SET_ELEM_KEY)
+        .attr(NFTA_DATA_VALUE, key)
+        .end();
+    if let Some(t) = timeout_ms {
+        b.attr(NFTA_SET_ELEM_TIMEOUT, &t.to_be_bytes());
+    }
+    b.end().end();
+}
+
+/// Element lookup: data and ACK 0 if present; -ENOENT if absent, and also
+/// if the set or table is missing. Interval sets match a containing range.
+pub fn msg_nft_get(seq: u32, family: u8, table: &[u8], set: &[u8], key: &[u8]) -> Vec<u8> {
+    let mut b = Builder::nft(NFT_MSG_GETSETELEM, NLM_F_REQUEST | NLM_F_ACK, seq, family);
+    nft_elem(&mut b, table, set, key, None);
+    b.finish()
+}
+
+/// Element add in a batch of its own; only `seq` is acknowledged. EXCL: an
+/// existing element keeps its timeout (-EEXIST).
+pub fn msg_nft_add(
+    seq: u32,
+    family: u8,
+    table: &[u8],
+    set: &[u8],
+    key: &[u8],
+    timeout_ms: u64,
+) -> Vec<u8> {
+    let begin = Builder::raw(
+        NFNL_MSG_BATCH_BEGIN,
+        NLM_F_REQUEST,
+        seq.wrapping_sub(1),
+        0,
+        NFNL_SUBSYS_NFTABLES,
+    );
+    let mut b = Builder::nft(
+        NFT_MSG_NEWSETELEM,
+        NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        seq,
+        family,
+    );
+    nft_elem(&mut b, table, set, key, Some(timeout_ms));
+    let end = Builder::raw(
+        NFNL_MSG_BATCH_END,
+        NLM_F_REQUEST,
+        seq.wrapping_add(1),
+        0,
+        NFNL_SUBSYS_NFTABLES,
+    );
+    let mut v = begin.finish();
+    v.extend(b.finish());
+    v.extend(end.finish());
+    v
+}
+
 #[derive(Debug)]
 pub enum Reply<'a> {
-    Ack { seq: u32, errno: i32 },
-    Done { seq: u32 },
-    Data { seq: u32, cmd: u16, attrs: &'a [u8] },
+    Ack {
+        seq: u32,
+        errno: i32,
+    },
+    Done {
+        seq: u32,
+    },
+    Data {
+        subsys: u16,
+        cmd: u16,
+        attrs: &'a [u8],
+    },
 }
 
 pub fn parse(buf: &[u8]) -> Result<Vec<Reply<'_>>, &'static str> {
@@ -231,12 +352,12 @@ pub fn parse(buf: &[u8]) -> Result<Vec<Reply<'_>>, &'static str> {
                 out.push(Reply::Ack { seq, errno });
             }
             NLMSG_DONE => out.push(Reply::Done { seq }),
-            t if t >> 8 == NFNL_SUBSYS_IPSET => {
+            t if t >> 8 == NFNL_SUBSYS_IPSET || t >> 8 == NFNL_SUBSYS_NFTABLES => {
                 if body.len() < NFGEN_HDRLEN {
                     return Err("short nfgenmsg");
                 }
                 out.push(Reply::Data {
-                    seq,
+                    subsys: t >> 8,
                     cmd: t & 0xff,
                     attrs: &body[NFGEN_HDRLEN..],
                 });
@@ -321,6 +442,37 @@ mod tests {
         assert_eq!(&m[m.len() - 4..], &3600u32.to_be_bytes());
         let n = msg_add(3, 7, b"ban", &Addr::V4([192, 0, 2, 1]), Some(24), 60);
         assert_eq!(n.len(), m.len() + 8);
+    }
+
+    #[test]
+    fn nft_add_layout() {
+        let m = msg_nft_add(10, 1, b"filter", b"ban", &[192, 0, 2, 1], 60_000);
+        let msgs: Vec<(u16, u16, u32)> = {
+            let mut v = Vec::new();
+            let mut off = 0;
+            while off < m.len() {
+                let len = u32::from_ne_bytes([m[off], m[off + 1], m[off + 2], m[off + 3]]) as usize;
+                v.push((
+                    u16::from_ne_bytes([m[off + 4], m[off + 5]]),
+                    u16::from_ne_bytes([m[off + 6], m[off + 7]]),
+                    u32::from_ne_bytes([m[off + 8], m[off + 9], m[off + 10], m[off + 11]]),
+                ));
+                off += len;
+            }
+            v
+        };
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0], (0x10, NLM_F_REQUEST, 9));
+        assert_eq!(msgs[1].0, (10 << 8) | 12);
+        assert_eq!(
+            msgs[1].1,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL
+        );
+        assert_eq!(msgs[2], (0x11, NLM_F_REQUEST, 11));
+        // batch begin: res_id NFNL_SUBSYS_NFTABLES, big-endian
+        assert_eq!(&m[18..20], &[0, 10]);
+        let b = msg_nft_add(10, 1, b"filter", b"ban", &[192, 0, 2, 1], 60_000);
+        assert!(b.windows(8).any(|w| w == 60_000u64.to_be_bytes()));
     }
 
     #[test]

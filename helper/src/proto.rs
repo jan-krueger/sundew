@@ -1,11 +1,12 @@
 //! Wire formats. Mirror: src/sw_proto.h
 
-pub const PROTO_VERSION: u8 = 2;
+pub const PROTO_VERSION: u8 = 3;
 pub const FRAME_MAGIC: u16 = 0x5357;
 pub const MAX_SETS: usize = 64;
 pub const MAX_RULES: usize = 64;
 pub const MAX_PROTECT: usize = 256;
 pub const SETNAME_LEN: usize = 32;
+pub const NFT_NAME_LEN: usize = 64;
 pub const MAX_TIMEOUT: u32 = 2_147_483;
 
 pub const FD_POLICY: i32 = 3;
@@ -13,13 +14,18 @@ pub const FD_CTL: i32 = 4;
 pub const FD_SLOT0: i32 = 5;
 
 pub const POLICY_MAGIC: u32 = 0x4c50_5753;
-pub const POLICY_VERSION: u16 = 2;
+pub const POLICY_VERSION: u16 = 3;
 pub const POLICY_HDR_LEN: usize = 40;
-pub const POLICY_SET_LEN: usize = 40;
+pub const POLICY_SET_LEN: usize = 8 + 2 * NFT_NAME_LEN;
 pub const POLICY_RULE_LEN: usize = 16;
 pub const POLICY_PROTECT_LEN: usize = 20;
 pub const ROLE_LOOKUP: u8 = 1;
 pub const ROLE_ADD: u8 = 2;
+pub const BACKEND_IPSET: u8 = 1;
+pub const BACKEND_NFT: u8 = 2;
+pub const NFPROTO_INET: u8 = 1;
+pub const NFPROTO_IPV4: u8 = 2;
+pub const NFPROTO_IPV6: u8 = 10;
 
 pub const CTL_READY: u8 = 1;
 pub const CTL_DRAIN: u8 = 2;
@@ -37,6 +43,9 @@ pub const ERR_SANDBOX: u16 = 5;
 /// READY per-set errors beyond -errno
 pub const SETERR_NO_TIMEOUT: i32 = -9001;
 pub const SETERR_NEED_TIMEOUT: i32 = -9002;
+pub const SETERR_NFT_KEY: i32 = -9003;
+pub const SETERR_NFT_INTERVAL: i32 = -9004;
+pub const SETERR_NFT_CONSTANT: i32 = -9005;
 
 pub const OP_TEST: u8 = 1;
 pub const OP_ADD: u8 = 2;
@@ -90,8 +99,13 @@ fn u64_at(b: &[u8], o: usize) -> u64 {
 
 #[derive(Debug, Clone)]
 pub struct PolicySet {
-    pub name: Vec<u8>,
+    pub backend: u8,
     pub role: u8,
+    /// nft table family, 0 for ipset
+    pub family: u8,
+    /// nft only
+    pub table: Vec<u8>,
+    pub name: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -133,6 +147,25 @@ fn valid_setname(n: &[u8]) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || b"_.:-".contains(c))
 }
 
+fn valid_nft_name(n: &[u8], extra: &[u8]) -> bool {
+    !n.is_empty()
+        && n.len() < NFT_NAME_LEN
+        && n.iter()
+            .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(c) || extra.contains(c))
+}
+
+/// NUL-terminated, NUL-padded field.
+fn padded(f: &[u8]) -> Result<&[u8], &'static str> {
+    let len = f
+        .iter()
+        .position(|&c| c == 0)
+        .ok_or("name not terminated")?;
+    if f[len..].iter().any(|&c| c != 0) {
+        return Err("nonzero padding");
+    }
+    Ok(&f[..len])
+}
+
 impl Policy {
     pub fn decode(b: &[u8]) -> Result<Policy, &'static str> {
         if b.len() < POLICY_HDR_LEN {
@@ -162,25 +195,34 @@ impl Policy {
         let mut sets = Vec::with_capacity(nsets);
         for i in 0..nsets {
             let r = &b[POLICY_HDR_LEN + i * POLICY_SET_LEN..][..POLICY_SET_LEN];
-            let name_raw = &r[..SETNAME_LEN];
-            let len = name_raw
-                .iter()
-                .position(|&c| c == 0)
-                .ok_or("name not terminated")?;
-            if name_raw[len..].iter().any(|&c| c != 0)
-                || r[SETNAME_LEN + 1..].iter().any(|&c| c != 0)
-            {
+            let (backend, role, family) = (r[0], r[1], r[2]);
+            if r[3..8].iter().any(|&c| c != 0) {
                 return Err("nonzero padding");
             }
-            let name = name_raw[..len].to_vec();
-            if !valid_setname(&name) {
-                return Err("invalid set name");
+            let table = padded(&r[8..8 + NFT_NAME_LEN])?;
+            let name = padded(&r[8 + NFT_NAME_LEN..])?;
+            let ok = match backend {
+                BACKEND_IPSET => family == 0 && table.is_empty() && valid_setname(name),
+                BACKEND_NFT => {
+                    [NFPROTO_INET, NFPROTO_IPV4, NFPROTO_IPV6].contains(&family)
+                        && valid_nft_name(table, b"")
+                        && valid_nft_name(name, b"/")
+                }
+                _ => false,
+            };
+            if !ok {
+                return Err("invalid set");
             }
-            let role = r[SETNAME_LEN];
             if role == 0 || role & !(ROLE_LOOKUP | ROLE_ADD) != 0 {
                 return Err("bad role");
             }
-            sets.push(PolicySet { name, role });
+            sets.push(PolicySet {
+                backend,
+                role,
+                family,
+                table: table.to_vec(),
+                name: name.to_vec(),
+            });
         }
         let mut rules = Vec::with_capacity(nrules);
         for i in 0..nrules {
@@ -411,8 +453,10 @@ mod tests {
         good_policy[4..6].copy_from_slice(&POLICY_VERSION.to_ne_bytes());
         good_policy[6..8].copy_from_slice(&1u16.to_ne_bytes());
         good_policy[8..12].copy_from_slice(&2u32.to_ne_bytes());
-        good_policy[POLICY_HDR_LEN..POLICY_HDR_LEN + 3].copy_from_slice(b"bad");
-        good_policy[POLICY_HDR_LEN + SETNAME_LEN] = ROLE_LOOKUP | ROLE_ADD;
+        good_policy[POLICY_HDR_LEN] = BACKEND_IPSET;
+        good_policy[POLICY_HDR_LEN + 1] = ROLE_LOOKUP | ROLE_ADD;
+        let n = POLICY_HDR_LEN + 8 + NFT_NAME_LEN;
+        good_policy[n..n + 3].copy_from_slice(b"bad");
         good_policy[32..34].copy_from_slice(&1u16.to_ne_bytes());
         good_policy[34..36].copy_from_slice(&1u16.to_ne_bytes());
         let r = POLICY_HDR_LEN + POLICY_SET_LEN;
@@ -427,10 +471,26 @@ mod tests {
         good_policy[p + 4] = 10;
         assert!(Policy::decode(&good_policy).is_ok());
 
+        let mut nft_policy = good_policy.clone();
+        nft_policy[POLICY_HDR_LEN] = BACKEND_NFT;
+        nft_policy[POLICY_HDR_LEN + 2] = NFPROTO_INET;
+        nft_policy[POLICY_HDR_LEN + 8..POLICY_HDR_LEN + 14].copy_from_slice(b"filter");
+        nft_policy[n..n + 7].copy_from_slice(b"ban/one");
+        let p = Policy::decode(&nft_policy).unwrap();
+        assert_eq!(p.sets[0].table, b"filter");
+        assert_eq!(p.sets[0].name, b"ban/one");
+        let mut bad = nft_policy.clone();
+        bad[POLICY_HDR_LEN + 2] = 3;
+        assert!(Policy::decode(&bad).is_err());
+        let mut bad = good_policy.clone();
+        bad[POLICY_HDR_LEN + 8] = b'x';
+        assert!(Policy::decode(&bad).is_err());
+
         for _ in 0..200_000 {
             let _ = decode_req(&rng.input(&good_req, 64));
             let _ = decode_drain(&rng.input(&[], 32));
             let _ = Policy::decode(&rng.input(&good_policy, 128));
+            let _ = Policy::decode(&rng.input(&nft_policy, 128));
         }
     }
 

@@ -230,29 +230,121 @@ ngx_sundew_core_create_conf(ngx_cycle_t *cycle)
 }
 
 
+static ngx_int_t
+ngx_sundew_valid_name(ngx_str_t *s, size_t max, const char *extra)
+{
+    u_char  *p;
+
+    if (s->len == 0 || s->len >= max) {
+        return 0;
+    }
+
+    for (p = s->data; p < s->data + s->len; p++) {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')
+              || (*p >= '0' && *p <= '9')
+              || *p == '_' || *p == '.' || *p == '-'
+              || (*p != '\0' && ngx_strchr(extra, *p) != NULL)))
+        {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+
+/* "nft:family/table/set"; the set name may contain "/" */
+static ngx_int_t
+ngx_sundew_parse_nft(ngx_str_t *ref, ngx_uint_t *family, ngx_str_t *table,
+    ngx_str_t *set)
+{
+    u_char     *p, *last, *slash;
+    ngx_str_t   fam;
+
+    p = ref->data + 4;
+    last = ref->data + ref->len;
+
+    slash = ngx_strlchr(p, last, '/');
+    if (slash == NULL) {
+        return NGX_ERROR;
+    }
+
+    fam.data = p;
+    fam.len = slash - p;
+    p = slash + 1;
+
+    slash = ngx_strlchr(p, last, '/');
+    if (slash == NULL) {
+        return NGX_ERROR;
+    }
+
+    table->data = p;
+    table->len = slash - p;
+    set->data = slash + 1;
+    set->len = last - set->data;
+
+    if (fam.len == 4 && ngx_strncmp(fam.data, "inet", 4) == 0) {
+        *family = SW_NFPROTO_INET;
+
+    } else if (fam.len == 2 && ngx_strncmp(fam.data, "ip", 2) == 0) {
+        *family = SW_NFPROTO_IPV4;
+
+    } else if (fam.len == 3 && ngx_strncmp(fam.data, "ip6", 3) == 0) {
+        *family = SW_NFPROTO_IPV6;
+
+    } else {
+        return NGX_ERROR;
+    }
+
+    if (!ngx_sundew_valid_name(table, SW_NFT_NAMELEN, "")
+        || !ngx_sundew_valid_name(set, SW_NFT_NAMELEN, "/"))
+    {
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+
 ngx_int_t
 ngx_sundew_add_set(ngx_conf_t *cf, ngx_str_t *name, ngx_uint_t role)
 {
-    u_char                  *p;
-    ngx_uint_t               i;
+    ngx_str_t                table, kname;
+    ngx_uint_t               i, backend, family;
     ngx_sundew_set_t        *set;
     ngx_sundew_core_conf_t  *scf;
 
     scf = (ngx_sundew_core_conf_t *) ngx_get_conf(cf->cycle->conf_ctx,
                                                   ngx_sundew_core_module);
 
-    if (name->len == 0 || name->len >= SW_SETNAME_LEN) {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                           "invalid set name \"%V\": must be 1-%d characters",
-                           name, SW_SETNAME_LEN - 1);
-        return NGX_ERROR;
-    }
+    ngx_str_null(&table);
+    family = 0;
 
-    for (p = name->data; p < name->data + name->len; p++) {
-        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')
-              || (*p >= '0' && *p <= '9')
-              || *p == '_' || *p == '.' || *p == ':' || *p == '-'))
-        {
+    if (name->len > 4 && ngx_strncmp(name->data, "nft:", 4) == 0) {
+        backend = SW_BACKEND_NFT;
+
+        if (ngx_sundew_parse_nft(name, &family, &table, &kname) != NGX_OK) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "invalid nftables set \"%V\": expected "
+                               "\"nft:FAMILY/TABLE/SET\" with FAMILY ip, ip6 "
+                               "or inet, and TABLE and SET 1-%d characters "
+                               "of letters, digits, \"_\", \".\" and \"-\"",
+                               name, SW_NFT_NAMELEN - 1);
+            return NGX_ERROR;
+        }
+
+    } else {
+        backend = SW_BACKEND_IPSET;
+        kname = *name;
+
+        if (name->len == 0 || name->len >= SW_SETNAME_LEN) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "invalid set name \"%V\": must be 1-%d "
+                               "characters", name, SW_SETNAME_LEN - 1);
+            return NGX_ERROR;
+        }
+
+        if (!ngx_sundew_valid_name(name, SW_SETNAME_LEN, ":")) {
             ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                                "invalid character in set name \"%V\"", name);
             return NGX_ERROR;
@@ -306,6 +398,10 @@ ngx_sundew_add_set(ngx_conf_t *cf, ngx_str_t *name, ngx_uint_t role)
     ngx_memzero(set, sizeof(ngx_sundew_set_t));
     set->name = *name;
     set->role = role;
+    set->backend = backend;
+    set->nft_family = family;
+    set->table = table;
+    set->set = kname;
 
     if (role & SW_ROLE_ADD) {
         set->file = cf->conf_file->file.name;
@@ -860,8 +956,11 @@ ngx_sundew_policy_fd(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf,
 
     for (i = 0; i < scf->sets.nelts; i++) {
         ps = (sw_policy_set_t *) p;
-        ngx_memcpy(ps->name, set[i].name.data, set[i].name.len);
+        ps->backend = (uint8_t) set[i].backend;
         ps->role = (uint8_t) (set[i].role & (SW_ROLE_LOOKUP|SW_ROLE_ADD));
+        ps->family = (uint8_t) set[i].nft_family;
+        ngx_memcpy(ps->table, set[i].table.data, set[i].table.len);
+        ngx_memcpy(ps->name, set[i].set.data, set[i].set.len);
         p += sizeof(sw_policy_set_t);
     }
 
@@ -1264,6 +1363,68 @@ ngx_sundew_strerr(int32_t err)
 }
 
 
+/* READY errors of nftables sets; NGX_DECLINED if not one of them */
+static ngx_int_t
+ngx_sundew_nft_error(ngx_cycle_t *cycle, ngx_sundew_set_t *set, int32_t err)
+{
+    const char  *fam, *flags;
+
+    fam = set->nft_family == SW_NFPROTO_INET ? "inet"
+          : set->nft_family == SW_NFPROTO_IPV6 ? "ip6" : "ip";
+    flags = (set->role & SW_ROLE_ADD) ? " flags timeout;" : "";
+
+    switch (err) {
+
+    case -ENOENT:
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "sundew: set \"%V\": table or set does not exist; "
+                      "create it, e.g. \"nft add set %s %V %V "
+                      "'{ type ipv4_addr;%s }'\"", &set->name, fam,
+                      &set->table, &set->set, flags);
+        return NGX_ERROR;
+
+    case -EOPNOTSUPP:
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "sundew: set \"%V\": nftables unavailable (is the "
+                      "nf_tables kernel module loaded? \"modprobe "
+                      "nf_tables\")", &set->name);
+        return NGX_ERROR;
+
+    case SW_SETERR_NO_TIMEOUT:
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "sundew: set \"%V\" is added to (%V:%ui) but has no "
+                      "\"flags timeout\", so bans would never expire; "
+                      "recreate it, e.g. \"nft add set %s %V %V "
+                      "'{ type ipv4_addr; flags timeout; }'\"", &set->name,
+                      &set->file, set->line, fam, &set->table, &set->set);
+        return NGX_ERROR;
+
+    case SW_SETERR_NFT_KEY:
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "sundew: set \"%V\" is not supported: it must be a "
+                      "set, not a map, of type ipv4_addr or ipv6_addr "
+                      "without concatenations", &set->name);
+        return NGX_ERROR;
+
+    case SW_SETERR_NFT_INTERVAL:
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "sundew: set \"%V\" is added to (%V:%ui) but has "
+                      "\"flags interval\"; bans need a set without it",
+                      &set->name, &set->file, set->line);
+        return NGX_ERROR;
+
+    case SW_SETERR_NFT_CONSTANT:
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "sundew: set \"%V\" is added to (%V:%ui) but has "
+                      "\"flags constant\"", &set->name, &set->file,
+                      set->line);
+        return NGX_ERROR;
+    }
+
+    return NGX_DECLINED;
+}
+
+
 static ngx_int_t
 ngx_sundew_handshake(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf, int ctl)
 {
@@ -1341,6 +1502,13 @@ ngx_sundew_handshake(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf, int ctl)
     rc = NGX_OK;
 
     for (i = 0; i < scf->sets.nelts; i++) {
+
+        if (rs[i].err != 0 && set[i].backend == SW_BACKEND_NFT
+            && ngx_sundew_nft_error(cycle, &set[i], rs[i].err) == NGX_ERROR)
+        {
+            rc = NGX_ERROR;
+            continue;
+        }
 
         if (rs[i].err == -ENOENT) {
             ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,

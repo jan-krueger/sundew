@@ -678,8 +678,8 @@ sw_client_log(ngx_log_t *log, sw_rep_t *rep)
 
     case SW_LOG_SET_FULL:
         ngx_log_error(level, log, 0,
-                      "sundew: set \"%V\" is full (maxelem); nothing more "
-                      "can be added", name);
+                      "sundew: set \"%V\" is full; nothing more can be "
+                      "added", name);
         break;
 
     case SW_LOG_LANDLOCK:

@@ -11,10 +11,12 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define SW_PROTO_VERSION        2
+#define SW_PROTO_VERSION        3
 #define SW_FRAME_MAGIC          0x5357          /* "SW" */
 #define SW_MAX_SETS             64
 #define SW_SETNAME_LEN          32              /* IPSET_MAXNAMELEN */
+#define SW_NFT_NAMELEN          64              /* nft table and set names */
+#define SW_SETREF_LEN           144             /* "nft:family/table/set" */
 #define SW_MAX_RULES            64
 #define SW_MAX_PROTECT          256
 #define SW_MAX_TIMEOUT          2147483         /* IPSET_MAX_TIMEOUT */
@@ -28,10 +30,17 @@
 /* ---- policy (memfd, master -> helper, sealed) ------------------------ */
 
 #define SW_POLICY_MAGIC         0x4c505753      /* "SWPL" */
-#define SW_POLICY_VERSION       2
+#define SW_POLICY_VERSION       3
 
 #define SW_ROLE_LOOKUP          1
 #define SW_ROLE_ADD             2
+
+#define SW_BACKEND_IPSET        1
+#define SW_BACKEND_NFT          2
+
+#define SW_NFPROTO_INET         1
+#define SW_NFPROTO_IPV4         2
+#define SW_NFPROTO_IPV6         10
 
 typedef struct {
     uint32_t  magic;
@@ -49,9 +58,12 @@ typedef struct {
 } sw_policy_hdr_t;
 
 typedef struct {
-    char      name[SW_SETNAME_LEN];             /* NUL-padded */
+    uint8_t   backend;
     uint8_t   role;
-    uint8_t   zero[7];
+    uint8_t   family;                           /* nft table family, 0 for ipset */
+    uint8_t   zero[5];
+    char      table[SW_NFT_NAMELEN];            /* nft only; NUL-padded */
+    char      name[SW_NFT_NAMELEN];             /* NUL-padded; ipset < 32 */
 } sw_policy_set_t;
 
 /* follows the sets */
@@ -102,6 +114,9 @@ typedef struct {
 
 #define SW_SETERR_NO_TIMEOUT    -9001           /* add target without timeout support */
 #define SW_SETERR_NEED_TIMEOUT  -9002           /* no timeout given and no set default */
+#define SW_SETERR_NFT_KEY       -9003           /* nft set key not ipv4_addr / ipv6_addr */
+#define SW_SETERR_NFT_INTERVAL  -9004           /* nft interval set as add target */
+#define SW_SETERR_NFT_CONSTANT  -9005           /* nft constant set as add target */
 
 typedef struct {
     sw_ctl_hdr_t  hdr;                          /* type = SW_CTL_DRAIN */
@@ -172,7 +187,7 @@ typedef struct {
 _Static_assert(sizeof(sw_policy_hdr_t) == 40, "policy hdr");
 _Static_assert(sizeof(sw_policy_rule_t) == 16, "policy rule");
 _Static_assert(sizeof(sw_policy_protect_t) == 20, "policy protect");
-_Static_assert(sizeof(sw_policy_set_t) == 40, "policy set");
+_Static_assert(sizeof(sw_policy_set_t) == 136, "policy set");
 _Static_assert(sizeof(sw_ctl_hdr_t) == 16, "ctl hdr");
 _Static_assert(sizeof(sw_ready_set_t) == 48, "ready set");
 _Static_assert(sizeof(sw_drain_t) == 24, "drain");
