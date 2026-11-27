@@ -21,6 +21,7 @@
 #include "sw_cache.h"
 #include "sw_client.h"
 #include "sw_stats.h"
+#include "sw_ratelimit.h"
 
 
 #ifndef SYS_pidfd_open
@@ -77,6 +78,14 @@ static void ngx_sundew_drain(ngx_cycle_t *cycle, ngx_sundew_helper_t *h,
 static void ngx_sundew_kill(ngx_sundew_helper_t *h);
 static void ngx_sundew_close_slots(void *data);
 static ngx_int_t ngx_sundew_verify_no_caps(ngx_cycle_t *cycle);
+static char *ngx_sundew_protect(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static char *ngx_sundew_writable_sets(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static ngx_int_t ngx_sundew_build_protect(ngx_cycle_t *cycle,
+    ngx_sundew_core_conf_t *scf);
+static ngx_int_t ngx_sundew_check_writes(ngx_cycle_t *cycle,
+    ngx_sundew_core_conf_t *scf);
 
 
 static ngx_sundew_helper_t  ngx_sundew_helpers[SW_MAX_HELPERS];
@@ -85,6 +94,7 @@ static ngx_uint_t           ngx_sundew_generation;
 
 static ngx_str_t  sw_cache_zone_name = ngx_string("sundew_cache");
 static ngx_str_t  sw_stats_zone_name = ngx_string("sundew_stats");
+static ngx_str_t  sw_rl_zone_name = ngx_string("sundew_ratelimit");
 
 
 static ngx_command_t  ngx_sundew_core_commands[] = {
@@ -115,6 +125,27 @@ static ngx_command_t  ngx_sundew_core_commands[] = {
       ngx_conf_set_sec_slot,
       0,
       offsetof(ngx_sundew_core_conf_t, drain_timeout),
+      NULL },
+
+    { ngx_string("sundew_protect"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_1MORE,
+      ngx_sundew_protect,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("sundew_writable_sets"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_1MORE,
+      ngx_sundew_writable_sets,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("sundew_ratelimit_zone_size"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_size_slot,
+      0,
+      offsetof(ngx_sundew_core_conf_t, ratelimit_size),
       NULL },
 
     { ngx_string("sundew_cache_size"),
@@ -174,9 +205,23 @@ ngx_sundew_core_create_conf(ngx_cycle_t *cycle)
     scf->drain_timeout = NGX_CONF_UNSET;
     scf->debug_delay = NGX_CONF_UNSET_MSEC;
     scf->cache_size = NGX_CONF_UNSET_SIZE;
+    scf->ratelimit_size = NGX_CONF_UNSET_SIZE;
+    scf->writable = NGX_CONF_UNSET_PTR;
 
     if (ngx_array_init(&scf->sets, cycle->pool, 4, sizeof(ngx_sundew_set_t))
-        != NGX_OK)
+        != NGX_OK
+        || ngx_array_init(&scf->rules, cycle->pool, 4,
+                          sizeof(ngx_sundew_rule_t))
+           != NGX_OK
+        || ngx_array_init(&scf->protect, cycle->pool, 4,
+                          sizeof(ngx_sundew_cidr_t))
+           != NGX_OK
+        || ngx_array_init(&scf->unprotect, cycle->pool, 4,
+                          sizeof(ngx_sundew_cidr_t))
+           != NGX_OK
+        || ngx_array_init(&scf->policy_protect, cycle->pool, 32,
+                          sizeof(ngx_sundew_cidr_t))
+           != NGX_OK)
     {
         return NULL;
     }
@@ -220,6 +265,12 @@ ngx_sundew_add_set(ngx_conf_t *cf, ngx_str_t *name, ngx_uint_t role)
             && ngx_strncmp(set[i].name.data, name->data, name->len) == 0)
         {
             set[i].role |= role;
+
+            if ((role & SW_ROLE_ADD) && set[i].file.len == 0) {
+                set[i].file = cf->conf_file->file.name;
+                set[i].line = cf->conf_file->line;
+            }
+
             return i;
         }
     }
@@ -256,7 +307,319 @@ ngx_sundew_add_set(ngx_conf_t *cf, ngx_str_t *name, ngx_uint_t role)
     set->name = *name;
     set->role = role;
 
+    if (role & SW_ROLE_ADD) {
+        set->file = cf->conf_file->file.name;
+        set->line = cf->conf_file->line;
+    }
+
     return scf->sets.nelts - 1;
+}
+
+
+ngx_int_t
+ngx_sundew_add_rule(ngx_conf_t *cf, ngx_str_t *name, ngx_uint_t prefix4,
+    ngx_uint_t prefix6, ngx_uint_t timeout)
+{
+    ngx_int_t                idx;
+    ngx_uint_t               i;
+    ngx_sundew_rule_t       *rule;
+    ngx_sundew_core_conf_t  *scf;
+
+    idx = ngx_sundew_add_set(cf, name, SW_ROLE_ADD);
+    if (idx == NGX_ERROR) {
+        return NGX_ERROR;
+    }
+
+    scf = (ngx_sundew_core_conf_t *) ngx_get_conf(cf->cycle->conf_ctx,
+                                                  ngx_sundew_core_module);
+    rule = scf->rules.elts;
+
+    for (i = 0; i < scf->rules.nelts; i++) {
+        if (rule[i].set == (ngx_uint_t) idx && rule[i].prefix4 == prefix4
+            && rule[i].prefix6 == prefix6 && rule[i].timeout == timeout)
+        {
+            return i;
+        }
+    }
+
+    if (scf->rules.nelts >= SW_MAX_RULES) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "too many different add rules (max %d)",
+                           SW_MAX_RULES);
+        return NGX_ERROR;
+    }
+
+    rule = ngx_array_push(&scf->rules);
+    if (rule == NULL) {
+        return NGX_ERROR;
+    }
+
+    rule->set = idx;
+    rule->prefix4 = prefix4;
+    rule->prefix6 = prefix6;
+    rule->timeout = timeout;
+    rule->rate = 20;
+    rule->burst = 100;
+
+    return scf->rules.nelts - 1;
+}
+
+
+ngx_shm_zone_t *
+ngx_sundew_ratelimit_zone(ngx_conf_t *cf)
+{
+    ngx_sundew_core_conf_t  *scf;
+
+    scf = (ngx_sundew_core_conf_t *) ngx_get_conf(cf->cycle->conf_ctx,
+                                                  ngx_sundew_core_module);
+
+    if (scf->ratelimit_zone == NULL) {
+        scf->ratelimit_zone = ngx_shared_memory_add(cf, &sw_rl_zone_name, 0,
+                                                    &ngx_sundew_core_module);
+        if (scf->ratelimit_zone == NULL) {
+            return NULL;
+        }
+
+        scf->ratelimit_zone->init = sw_rl_zone_init;
+    }
+
+    return scf->ratelimit_zone;
+}
+
+
+static ngx_int_t
+ngx_sundew_parse_cidr(ngx_str_t *s, ngx_sundew_cidr_t *c)
+{
+    ngx_int_t   rc;
+    ngx_uint_t  i, n;
+    ngx_cidr_t  cidr;
+    u_char     *m;
+
+    rc = ngx_ptocidr(s, &cidr);
+    if (rc == NGX_ERROR) {
+        return NGX_ERROR;
+    }
+
+    ngx_memzero(c, sizeof(ngx_sundew_cidr_t));
+
+    switch (cidr.family) {
+
+#if (NGX_HAVE_INET6)
+    case AF_INET6:
+        c->family = 6;
+        ngx_memcpy(c->addr, cidr.u.in6.addr.s6_addr, 16);
+        m = cidr.u.in6.mask.s6_addr;
+        n = 16;
+        break;
+#endif
+
+    case AF_INET:
+        c->family = 4;
+        ngx_memcpy(c->addr, &cidr.u.in.addr, 4);
+        m = (u_char *) &cidr.u.in.mask;
+        n = 4;
+        break;
+
+    default:
+        return NGX_ERROR;
+    }
+
+    for (i = 0; i < n; i++) {
+        c->prefix += __builtin_popcount(m[i]);
+    }
+
+    return NGX_OK;
+}
+
+
+static char *
+ngx_sundew_protect(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sundew_core_conf_t *scf = conf;
+
+    ngx_str_t          *value, s;
+    ngx_uint_t          i;
+    ngx_sundew_cidr_t  *c;
+
+    value = cf->args->elts;
+
+    for (i = 1; i < cf->args->nelts; i++) {
+        s = value[i];
+
+        if (s.len && s.data[0] == '!') {
+            s.data++;
+            s.len--;
+            c = ngx_array_push(&scf->unprotect);
+
+        } else {
+            c = ngx_array_push(&scf->protect);
+        }
+
+        if (c == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        if (ngx_sundew_parse_cidr(&s, c) != NGX_OK) {
+            return "has an invalid address or prefix";
+        }
+    }
+
+    return NGX_CONF_OK;
+}
+
+
+static char *
+ngx_sundew_writable_sets(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_sundew_core_conf_t *scf = conf;
+
+    ngx_str_t   *value, *s;
+    ngx_uint_t   i;
+
+    if (scf->writable == NGX_CONF_UNSET_PTR) {
+        scf->writable = ngx_array_create(cf->pool, 4, sizeof(ngx_str_t));
+        if (scf->writable == NULL) {
+            return NGX_CONF_ERROR;
+        }
+    }
+
+    value = cf->args->elts;
+
+    for (i = 1; i < cf->args->nelts; i++) {
+        s = ngx_array_push(scf->writable);
+        if (s == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        *s = value[i];
+    }
+
+    return NGX_CONF_OK;
+}
+
+
+static const char  *ngx_sundew_default_protect[] = {
+    "0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4",
+    "240.0.0.0/4", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+    "100.64.0.0/10",
+    "::/128", "::1/128", "fe80::/10", "ff00::/8", "fc00::/7",
+    "::ffff:0:0/96",
+    NULL
+};
+
+
+static ngx_int_t
+ngx_sundew_build_protect(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf)
+{
+    ngx_str_t           s;
+    ngx_uint_t          i, j, removed;
+    ngx_sundew_cidr_t   c, *out, *un, *add;
+
+    un = scf->unprotect.elts;
+    add = scf->protect.elts;
+    scf->policy_protect.nelts = 0;
+
+    for (i = 0; ngx_sundew_default_protect[i]; i++) {
+        s.data = (u_char *) ngx_sundew_default_protect[i];
+        s.len = ngx_strlen(ngx_sundew_default_protect[i]);
+
+        if (ngx_sundew_parse_cidr(&s, &c) != NGX_OK) {
+            ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                          "sundew: bad built-in protected prefix \"%V\"", &s);
+            return NGX_ERROR;
+        }
+
+        removed = 0;
+
+        for (j = 0; j < scf->unprotect.nelts; j++) {
+            if (un[j].family == c.family && un[j].prefix == c.prefix
+                && ngx_memcmp(un[j].addr, c.addr, 16) == 0)
+            {
+                removed = 1;
+            }
+        }
+
+        if (removed) {
+            continue;
+        }
+
+        out = ngx_array_push(&scf->policy_protect);
+        if (out == NULL) {
+            return NGX_ERROR;
+        }
+
+        *out = c;
+    }
+
+    for (i = 0; i < scf->protect.nelts; i++) {
+        out = ngx_array_push(&scf->policy_protect);
+        if (out == NULL) {
+            return NGX_ERROR;
+        }
+
+        *out = add[i];
+    }
+
+    if (scf->policy_protect.nelts > SW_MAX_PROTECT) {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "sundew: too many sundew_protect entries (max %d)",
+                      SW_MAX_PROTECT);
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_sundew_check_writes(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf)
+{
+    ngx_str_t         *w;
+    ngx_uint_t         i, j, found;
+    ngx_sundew_set_t  *set;
+
+    set = scf->sets.elts;
+
+    for (i = 0; i < scf->sets.nelts; i++) {
+        if (!(set[i].role & SW_ROLE_ADD)) {
+            continue;
+        }
+
+        if (set[i].role & NGX_SUNDEW_ALLOWLIST) {
+            ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                          "sundew: set \"%V\" is used by ipset_allowlist and "
+                          "is also added to in %V:%ui; an allowlist must not "
+                          "be written to", &set[i].name, &set[i].file,
+                          set[i].line);
+            return NGX_ERROR;
+        }
+
+        found = 0;
+
+        if (scf->writable != NGX_CONF_UNSET_PTR) {
+            w = scf->writable->elts;
+
+            for (j = 0; j < scf->writable->nelts; j++) {
+                if (w[j].len == set[i].name.len
+                    && ngx_strncmp(w[j].data, set[i].name.data, w[j].len) == 0)
+                {
+                    found = 1;
+                }
+            }
+        }
+
+        if (!found) {
+            ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                          "sundew: %V:%ui adds to set \"%V\", which is not "
+                          "listed in \"sundew_writable_sets\"; add "
+                          "\"sundew_writable_sets %V;\" at the top level of "
+                          "nginx.conf", &set[i].file, set[i].line,
+                          &set[i].name, &set[i].name);
+            return NGX_ERROR;
+        }
+    }
+
+    return NGX_OK;
 }
 
 
@@ -280,6 +643,24 @@ ngx_sundew_core_init_conf(ngx_cycle_t *cycle, void *conf)
 
     if (scf->cache_zone) {
         scf->cache_zone->shm.size = scf->cache_size;
+    }
+
+    ngx_conf_init_size_value(scf->ratelimit_size, 8 * 1024 * 1024);
+
+    if (scf->ratelimit_size < 1024 * 1024) {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "\"sundew_ratelimit_zone_size\" must be at least 1m");
+        return NGX_CONF_ERROR;
+    }
+
+    if (scf->ratelimit_zone) {
+        scf->ratelimit_zone->shm.size = scf->ratelimit_size;
+    }
+
+    if (ngx_sundew_check_writes(cycle, scf) != NGX_OK
+        || ngx_sundew_build_protect(cycle, scf) != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
     }
 
     if (scf->helper_user.len == 0) {
@@ -439,15 +820,22 @@ static int
 ngx_sundew_policy_fd(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf,
     uid_t huid, gid_t hgid, uid_t wuid)
 {
-    int                fd;
-    size_t             size;
-    u_char            *buf, *p;
-    ngx_uint_t         i;
-    sw_policy_hdr_t   *hdr;
-    sw_policy_set_t   *ps;
-    ngx_sundew_set_t  *set;
+    int                   fd;
+    size_t                size;
+    u_char               *buf, *p;
+    ngx_uint_t            i;
+    sw_policy_hdr_t      *hdr;
+    sw_policy_set_t      *ps;
+    sw_policy_rule_t     *pr;
+    sw_policy_protect_t  *pp;
+    ngx_sundew_set_t     *set;
+    ngx_sundew_rule_t    *rule;
+    ngx_sundew_cidr_t    *cidr;
 
-    size = sizeof(sw_policy_hdr_t) + scf->sets.nelts * sizeof(sw_policy_set_t);
+    size = sizeof(sw_policy_hdr_t)
+           + scf->sets.nelts * sizeof(sw_policy_set_t)
+           + scf->rules.nelts * sizeof(sw_policy_rule_t)
+           + scf->policy_protect.nelts * sizeof(sw_policy_protect_t);
 
     buf = ngx_pcalloc(cycle->pool, size);
     if (buf == NULL) {
@@ -464,6 +852,8 @@ ngx_sundew_policy_fd(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf,
     hdr->worker_uid = wuid;
     hdr->generation = (uint32_t) scf->generation;
     hdr->debug_delay_ms = (uint32_t) scf->debug_delay;
+    hdr->nrules = (uint16_t) scf->rules.nelts;
+    hdr->nprotect = (uint16_t) scf->policy_protect.nelts;
 
     p = buf + sizeof(sw_policy_hdr_t);
     set = scf->sets.elts;
@@ -471,8 +861,31 @@ ngx_sundew_policy_fd(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf,
     for (i = 0; i < scf->sets.nelts; i++) {
         ps = (sw_policy_set_t *) p;
         ngx_memcpy(ps->name, set[i].name.data, set[i].name.len);
-        ps->role = (uint8_t) set[i].role;
+        ps->role = (uint8_t) (set[i].role & (SW_ROLE_LOOKUP|SW_ROLE_ADD));
         p += sizeof(sw_policy_set_t);
+    }
+
+    rule = scf->rules.elts;
+
+    for (i = 0; i < scf->rules.nelts; i++) {
+        pr = (sw_policy_rule_t *) p;
+        pr->set = (uint8_t) rule[i].set;
+        pr->prefix4 = (uint8_t) rule[i].prefix4;
+        pr->prefix6 = (uint8_t) rule[i].prefix6;
+        pr->timeout = (uint32_t) rule[i].timeout;
+        pr->rate = (uint32_t) rule[i].rate;
+        pr->burst = (uint32_t) rule[i].burst;
+        p += sizeof(sw_policy_rule_t);
+    }
+
+    cidr = scf->policy_protect.elts;
+
+    for (i = 0; i < scf->policy_protect.nelts; i++) {
+        pp = (sw_policy_protect_t *) p;
+        pp->family = (uint8_t) cidr[i].family;
+        pp->prefix = (uint8_t) cidr[i].prefix;
+        ngx_memcpy(pp->addr, cidr[i].addr, 16);
+        p += sizeof(sw_policy_protect_t);
     }
 
     fd = memfd_create("sundew-policy", MFD_CLOEXEC|MFD_ALLOW_SEALING);
@@ -863,6 +1276,7 @@ ngx_sundew_handshake(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf, int ctl)
     sw_ctl_hdr_t      *hdr;
     sw_ready_set_t    *rs;
     ngx_sundew_set_t  *set;
+    ngx_sundew_rule_t *rule;
     static const char *helper_err[] = {
         "ok", "invalid policy", "capability setup failed",
         "netlink unavailable (is the ip_set kernel module loaded? "
@@ -937,6 +1351,27 @@ ngx_sundew_handshake(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf, int ctl)
             continue;
         }
 
+        if (rs[i].err == SW_SETERR_NO_TIMEOUT) {
+            ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                          "sundew: set \"%V\" is added to (%V:%ui) but has "
+                          "no timeout support, so bans would never expire; "
+                          "recreate it with a timeout, e.g. \"ipset create "
+                          "%V hash:ip timeout 3600\"", &set[i].name,
+                          &set[i].file, set[i].line, &set[i].name);
+            rc = NGX_ERROR;
+            continue;
+        }
+
+        if (rs[i].err == SW_SETERR_NEED_TIMEOUT) {
+            ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                          "sundew: set \"%V\" is added to (%V:%ui) without "
+                          "a timeout, and the set's default timeout is 0 "
+                          "(permanent); give \"timeout=\" or \"ban_time=\"",
+                          &set[i].name, &set[i].file, set[i].line);
+            rc = NGX_ERROR;
+            continue;
+        }
+
         if (rs[i].err != 0) {
             ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
                           "sundew: set \"%V\": %s (%D)", &set[i].name,
@@ -947,6 +1382,8 @@ ngx_sundew_handshake(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf, int ctl)
 
         set[i].family = rs[i].family;
         set[i].revision = rs[i].revision;
+        set[i].has_timeout = rs[i].has_timeout;
+        set[i].default_timeout = rs[i].default_timeout;
 
         if (set[i].family == AF_INET6) {
             scf->mask6 |= (uint64_t) 1 << i;
@@ -962,6 +1399,29 @@ ngx_sundew_handshake(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf, int ctl)
                       "sundew: set \"%V\" %s family %s", &set[i].name,
                       set[i].type,
                       set[i].family == AF_INET6 ? "inet6" : "inet");
+    }
+
+    if (rc != NGX_OK) {
+        return rc;
+    }
+
+    rule = scf->rules.elts;
+
+    for (i = 0; i < scf->rules.nelts; i++) {
+        if ((rule[i].prefix4 != 32 || rule[i].prefix6 != 128)
+            && ngx_strcmp(set[rule[i].set].type, "hash:net") != 0)
+        {
+            ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                          "sundew: prefix4= and prefix6= need a hash:net "
+                          "set; \"%V\" is %s (%V:%ui)",
+                          &set[rule[i].set].name, set[rule[i].set].type,
+                          &set[rule[i].set].file, set[rule[i].set].line);
+            return NGX_ERROR;
+        }
+
+        if (rule[i].timeout == 0) {
+            rule[i].timeout = set[rule[i].set].default_timeout;
+        }
     }
 
     return rc;

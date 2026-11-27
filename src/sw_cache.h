@@ -40,7 +40,8 @@ sw_cache_addr(u_char *dst, ngx_uint_t family, const u_char *addr)
     }
 }
 
+/* max_age: seconds after which the entry is ignored, 0 for none */
 void sw_cache_put(ngx_shm_zone_t *zone, uint64_t ident, const u_char *addr,
-    ngx_uint_t verdict);
+    ngx_uint_t verdict, ngx_uint_t max_age);
 
 #endif /* SW_CACHE_H */

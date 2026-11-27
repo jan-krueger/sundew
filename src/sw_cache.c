@@ -43,10 +43,12 @@ _Static_assert(sizeof(sw_entry_t) == 32, "entry");
 _Static_assert(sizeof(sw_bucket_t) == 256, "bucket");
 
 
-#define sw_meta(checked, verdict)                                           \
-    ((uint64_t) (uint32_t) (checked) | (uint64_t) (verdict) << 32)
+#define sw_meta(checked, verdict, max_age)                                  \
+    ((uint64_t) (uint32_t) (checked) | (uint64_t) (verdict) << 32           \
+     | (uint64_t) ((max_age) & 0xffffff) << 40)
 #define sw_meta_checked(m)  ((uint32_t) (m))
 #define sw_meta_verdict(m)  ((ngx_uint_t) (((m) >> 32) & 0xff))
+#define sw_meta_max_age(m)  ((ngx_msec_t) ((m) >> 40) * 1000)
 
 
 static uint32_t
@@ -228,6 +230,10 @@ sw_cache_get(ngx_shm_zone_t *zone, uint64_t ident, const u_char *addr,
         *age = (ngx_msec_t) (uint32_t) (sw_now_tick() - sw_meta_checked(meta))
                * SW_TICK_MS;
 
+        if (sw_meta_max_age(meta) != 0 && *age > sw_meta_max_age(meta)) {
+            return NGX_DECLINED;
+        }
+
         return NGX_OK;
     }
 
@@ -237,7 +243,7 @@ sw_cache_get(ngx_shm_zone_t *zone, uint64_t ident, const u_char *addr,
 
 void
 sw_cache_put(ngx_shm_zone_t *zone, uint64_t ident, const u_char *addr,
-    ngx_uint_t verdict)
+    ngx_uint_t verdict, ngx_uint_t max_age)
 {
     uint8_t           tag;
     uint32_t          s, now, oldest, age;
@@ -254,7 +260,7 @@ sw_cache_put(ngx_shm_zone_t *zone, uint64_t ident, const u_char *addr,
 
     ngx_memcpy(w, addr, 16);
     w[2] = ident;
-    w[3] = sw_meta(now, verdict);
+    w[3] = sw_meta(now, verdict, max_age);
 
     ngx_shmtx_lock(&shpool->mutex);
 

@@ -11,6 +11,7 @@
 #include "sw_cache.h"
 #include "sw_client.h"
 #include "sw_stats.h"
+#include "sw_ratelimit.h"
 
 
 #define SW_STATE_NEW        0
@@ -21,6 +22,7 @@
 #define SW_RES_ALLOW        1
 #define SW_RES_DENY         2
 #define SW_RES_DRYRUN       3
+#define SW_RES_RATELIMITED  4
 
 #define SW_V_UNKNOWN        0
 #define SW_V_ALLOW          1
@@ -41,6 +43,16 @@ typedef struct {
     ngx_flag_t   dryrun;
     ngx_msec_t   lookup_timeout;
     time_t       cache_ttl;
+
+    ngx_int_t                  autoadd;     /* rule, -1 none */
+    ngx_uint_t                 autoadd_status;
+    ngx_http_complex_value_t  *autoadd_if;
+
+    ngx_int_t                  rl_id;       /* -1 none */
+    ngx_uint_t                 rl_rate;
+    ngx_msec_t                 rl_window;
+    ngx_int_t                  rl_rule;     /* autoban rule, -1 none */
+    ngx_uint_t                 rl_key6;
 } ngx_http_sundew_loc_conf_t;
 
 
@@ -54,6 +66,9 @@ typedef struct {
     uint64_t              decided;
     uint64_t              matched;
     uint64_t              stale_in;
+    ngx_int_t             rc;               /* final result, for re-entry */
+    ngx_uint_t            family;
+    u_char                addr[16];
 } ngx_http_sundew_ctx_t;
 
 
@@ -68,6 +83,12 @@ static char *ngx_http_sundew_status(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_sundew_endpoint(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char *ngx_http_sundew_autoadd(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static char *ngx_http_sundew_ratelimit(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static ngx_int_t ngx_http_sundew_writes(ngx_http_request_t *r,
+    ngx_http_sundew_loc_conf_t *slcf, ngx_http_sundew_ctx_t *ctx);
 
 
 static ngx_command_t  ngx_http_sundew_commands[] = {
@@ -137,6 +158,20 @@ static ngx_command_t  ngx_http_sundew_commands[] = {
       offsetof(ngx_http_sundew_loc_conf_t, lookup_timeout),
       NULL },
 
+    { ngx_string("ipset_autoadd"),
+      NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
+      ngx_http_sundew_autoadd,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    { ngx_string("ipset_ratelimit"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
+      ngx_http_sundew_ratelimit,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
     { ngx_string("ipset_stats"),
       NGX_HTTP_LOC_CONF|NGX_CONF_NOARGS,
       ngx_http_sundew_endpoint,
@@ -190,7 +225,8 @@ static ngx_str_t  ngx_http_sundew_results[] = {
     ngx_null_string,
     ngx_string("allow"),
     ngx_string("deny"),
-    ngx_string("dryrun")
+    ngx_string("dryrun"),
+    ngx_string("ratelimited")
 };
 
 static ngx_str_t  ngx_http_sundew_no_set = ngx_string("-");
@@ -323,12 +359,13 @@ ngx_http_sundew_apply(ngx_http_request_t *r, ngx_http_sundew_loc_conf_t *slcf,
         hit = ctx->matched & amask;
         ctx->matched_set = (ngx_int_t) __builtin_ctzll(hit);
         sw_stats_set_matched(ctx->matched_set);
-        /* fall through */
-
-    default:
         sw_stats_inc(SW_STAT_ALLOWED);
         ctx->result = SW_RES_ALLOW;
         return NGX_DECLINED;
+
+    default:
+        ctx->result = SW_RES_ALLOW;
+        return ngx_http_sundew_writes(r, slcf, ctx);
     }
 }
 
@@ -448,6 +485,229 @@ ngx_http_sundew_cache_lookup(ngx_http_sundew_loc_conf_t *slcf,
 }
 
 
+/* why an autoadd must not add this request's address, or NULL */
+
+static const char *
+ngx_http_sundew_skip_add(ngx_http_request_t *r,
+    ngx_http_sundew_loc_conf_t *slcf)
+{
+    ngx_str_t         v;
+    ngx_uint_t        i;
+    ngx_list_part_t  *part;
+    ngx_table_elt_t  *h;
+
+    if (slcf->dryrun) {
+        return "dry run";
+    }
+
+    part = &r->headers_in.headers.part;
+    h = part->elts;
+
+    for (i = 0; /* void */; i++) {
+
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+
+            part = part->next;
+            h = part->elts;
+            i = 0;
+        }
+
+        if (h[i].key.len > 10
+            && ngx_strncasecmp(h[i].key.data, (u_char *) "sec-fetch-", 10)
+               == 0)
+        {
+            return "browser request (Sec-Fetch-*)";
+        }
+
+        if (((h[i].key.len == 11
+              && ngx_strncasecmp(h[i].key.data, (u_char *) "sec-purpose", 11)
+                 == 0)
+             || (h[i].key.len == 7
+                 && ngx_strncasecmp(h[i].key.data, (u_char *) "purpose", 7)
+                    == 0))
+            && (ngx_strlcasestrn(h[i].value.data,
+                                 h[i].value.data + h[i].value.len,
+                                 (u_char *) "prefetch", 8 - 1) != NULL
+                || ngx_strlcasestrn(h[i].value.data,
+                                    h[i].value.data + h[i].value.len,
+                                    (u_char *) "prerender", 9 - 1) != NULL))
+        {
+            return "prefetch";
+        }
+    }
+
+#if (NGX_HTTP_SSL)
+    if (r->connection->ssl
+        && ngx_ssl_get_early_data(r->connection, r->pool, &v) == NGX_OK
+        && v.len)
+    {
+        return "TLS early data";
+    }
+#endif
+
+    if (slcf->autoadd_if) {
+        if (ngx_http_complex_value(r, slcf->autoadd_if, &v) != NGX_OK) {
+            return "if= failed";
+        }
+
+        if (v.len == 0 || (v.len == 1 && v.data[0] == '0')) {
+            return "if= is empty or 0";
+        }
+    }
+
+    return NULL;
+}
+
+
+static ngx_uint_t
+ngx_http_sundew_cross_site(ngx_http_request_t *r)
+{
+    ngx_uint_t        i;
+    ngx_list_part_t  *part;
+    ngx_table_elt_t  *h;
+
+    part = &r->headers_in.headers.part;
+    h = part->elts;
+
+    for (i = 0; /* void */; i++) {
+
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                return 0;
+            }
+
+            part = part->next;
+            h = part->elts;
+            i = 0;
+        }
+
+        if (h[i].key.len == 14
+            && ngx_strncasecmp(h[i].key.data, (u_char *) "sec-fetch-site", 14)
+               == 0
+            && h[i].value.len == 10
+            && ngx_strncasecmp(h[i].value.data, (u_char *) "cross-site", 10)
+               == 0)
+        {
+            return 1;
+        }
+    }
+}
+
+
+/* rate limit and autoadd, for requests the lists let through */
+
+static ngx_int_t
+ngx_http_sundew_writes(ngx_http_request_t *r,
+    ngx_http_sundew_loc_conf_t *slcf, ngx_http_sundew_ctx_t *ctx)
+{
+    u_char                   key[16];
+    ngx_str_t               *name;
+    ngx_uint_t               rc, i, bits, level;
+    const char              *skip;
+    ngx_sundew_set_t        *set;
+    ngx_sundew_rule_t       *rule;
+    ngx_sundew_core_conf_t  *scf;
+
+    scf = ngx_http_sundew_core_conf();
+    set = scf->sets.elts;
+    rule = scf->rules.elts;
+
+    if (slcf->rl_id >= 0 && scf->ratelimit_zone
+        && scf->ratelimit_zone->data)
+    {
+        sw_cache_addr(key, ctx->family, ctx->addr);
+
+        if (ctx->family == 6) {
+            for (i = 0; i < 16; i++) {
+                bits = (slcf->rl_key6 > i * 8) ? slcf->rl_key6 - i * 8 : 0;
+                key[i] &= (bits >= 8) ? 0xff : (u_char) (0xff << (8 - bits));
+            }
+        }
+
+        rc = sw_rl_hit(scf->ratelimit_zone, slcf->rl_id, key, slcf->rl_rate,
+                       slcf->rl_window);
+
+        if (rc != SW_RL_OK) {
+            sw_stats_inc(SW_STAT_RATELIMITED);
+
+            if (slcf->dryrun) {
+                ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0,
+                              "sundew: dryrun, would rate-limit %V",
+                              &r->connection->addr_text);
+                ctx->result = SW_RES_DRYRUN;
+
+            } else {
+                if (rc == SW_RL_FIRST && slcf->rl_rule >= 0) {
+                    name = &set[rule[slcf->rl_rule].set].name;
+
+                    if (ngx_http_sundew_cross_site(r)) {
+                        sw_stats_inc(SW_STAT_ADDS_SKIPPED);
+                        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                                      "sundew: not banning %V: cross-site "
+                                      "request", &r->connection->addr_text);
+
+                    } else {
+                        ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0,
+                                      "sundew: banning %V in set \"%V\" "
+                                      "for %uis (rate limit)",
+                                      &r->connection->addr_text, name,
+                                      rule[slcf->rl_rule].timeout);
+                        sw_client_add(slcf->rl_rule, ctx->family, ctx->addr);
+                    }
+                }
+
+                ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                              "sundew: rate-limited %V",
+                              &r->connection->addr_text);
+                ctx->result = SW_RES_RATELIMITED;
+
+                return NGX_HTTP_TOO_MANY_REQUESTS;
+            }
+        }
+    }
+
+    if (slcf->autoadd >= 0) {
+        sw_stats_inc(SW_STAT_TRAPPED);
+
+        name = &set[rule[slcf->autoadd].set].name;
+        skip = ngx_http_sundew_skip_add(r, slcf);
+
+        if (skip) {
+            sw_stats_inc(SW_STAT_ADDS_SKIPPED);
+            level = slcf->dryrun ? NGX_LOG_NOTICE : NGX_LOG_INFO;
+            ngx_log_error(level, r->connection->log, 0,
+                          "sundew: %s, not adding %V to set \"%V\"",
+                          skip, &r->connection->addr_text, name);
+
+        } else {
+            ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0,
+                          "sundew: adding %V to set \"%V\" for %uis",
+                          &r->connection->addr_text, name,
+                          rule[slcf->autoadd].timeout);
+            sw_client_add(slcf->autoadd, ctx->family, ctx->addr);
+        }
+
+        if (slcf->dryrun) {
+            ctx->result = SW_RES_DRYRUN;
+            return NGX_DECLINED;
+        }
+
+        ctx->result = SW_RES_DENY;
+        ctx->matched_set = rule[slcf->autoadd].set;
+        r->keepalive = 0;
+
+        return slcf->autoadd_status;
+    }
+
+    sw_stats_inc(SW_STAT_ALLOWED);
+
+    return NGX_DECLINED;
+}
+
+
 static void
 ngx_http_sundew_wake(sw_waiter_t *w)
 {
@@ -490,7 +750,9 @@ ngx_http_sundew_handler(ngx_http_request_t *r)
 
     slcf = ngx_http_get_module_loc_conf(r, ngx_http_sundew_module);
 
-    if (slcf->deny == 0 && slcf->allow == 0) {
+    if (slcf->deny == 0 && slcf->allow == 0 && slcf->autoadd < 0
+        && slcf->rl_id < 0)
+    {
         return NGX_DECLINED;
     }
 
@@ -514,13 +776,13 @@ ngx_http_sundew_handler(ngx_http_request_t *r)
 
         case SW_STATE_DONE:
             if (ctx->result != SW_RES_NONE) {
-                return (ctx->result == SW_RES_DENY) ? (ngx_int_t) slcf->status
-                                                    : NGX_DECLINED;
+                return ctx->rc;
             }
 
             r->write_event_handler = ngx_http_request_empty_handler;
             r->read_event_handler = ngx_http_block_reading;
-            return ngx_http_sundew_finish(r, slcf, ctx, dmask, amask);
+            ctx->rc = ngx_http_sundew_finish(r, slcf, ctx, dmask, amask);
+            return ctx->rc;
 
         default:
             return NGX_DECLINED;
@@ -536,10 +798,19 @@ ngx_http_sundew_handler(ngx_http_request_t *r)
     ctx->matched_set = -1;
     ctx->waiter.handler = ngx_http_sundew_wake;
     ctx->waiter.data = ctx;
+    ctx->family = family;
+    ngx_memcpy(ctx->addr, addr, 16);
 
     ngx_http_set_ctx(r, ctx, ngx_http_sundew_module);
 
     sw_stats_inc(SW_STAT_CHECKED);
+
+    if (slcf->deny == 0 && slcf->allow == 0) {
+        ctx->state = SW_STATE_DONE;
+        ctx->result = SW_RES_ALLOW;
+        ctx->rc = ngx_http_sundew_writes(r, slcf, ctx);
+        return ctx->rc;
+    }
 
     need = has_allow ? amask : dmask;
 
@@ -552,7 +823,8 @@ ngx_http_sundew_handler(ngx_http_request_t *r)
             sw_stats_inc(SW_STAT_CACHE_HIT);
         }
 
-        return ngx_http_sundew_apply(r, slcf, ctx, v, dmask, amask);
+        ctx->rc = ngx_http_sundew_apply(r, slcf, ctx, v, dmask, amask);
+        return ctx->rc;
     }
 
     sw_stats_inc(SW_STAT_CACHE_MISS);
@@ -572,7 +844,8 @@ ngx_http_sundew_handler(ngx_http_request_t *r)
                          slcf->lookup_timeout)
         != NGX_OK)
     {
-        return ngx_http_sundew_finish(r, slcf, ctx, dmask, amask);
+        ctx->rc = ngx_http_sundew_finish(r, slcf, ctx, dmask, amask);
+        return ctx->rc;
     }
 
     ctx->state = SW_STATE_PENDING;
@@ -807,6 +1080,8 @@ ngx_http_sundew_create_loc_conf(ngx_conf_t *cf)
     conf->dryrun = NGX_CONF_UNSET;
     conf->lookup_timeout = NGX_CONF_UNSET_MSEC;
     conf->cache_ttl = NGX_CONF_UNSET;
+    conf->autoadd = NGX_CONF_UNSET;
+    conf->rl_id = NGX_CONF_UNSET;
 
     return conf;
 }
@@ -833,6 +1108,20 @@ ngx_http_sundew_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->dryrun, prev->dryrun, 0);
     ngx_conf_merge_msec_value(conf->lookup_timeout, prev->lookup_timeout, 100);
     ngx_conf_merge_sec_value(conf->cache_ttl, prev->cache_ttl, 60);
+
+    if (conf->autoadd == NGX_CONF_UNSET) {
+        conf->autoadd = (prev->autoadd == NGX_CONF_UNSET) ? -1 : prev->autoadd;
+        conf->autoadd_status = prev->autoadd_status;
+        conf->autoadd_if = prev->autoadd_if;
+    }
+
+    if (conf->rl_id == NGX_CONF_UNSET) {
+        conf->rl_id = (prev->rl_id == NGX_CONF_UNSET) ? -1 : prev->rl_id;
+        conf->rl_rate = prev->rl_rate;
+        conf->rl_window = prev->rl_window;
+        conf->rl_rule = prev->rl_rule;
+        conf->rl_key6 = prev->rl_key6;
+    }
 
     return NGX_CONF_OK;
 }
@@ -869,7 +1158,9 @@ ngx_http_sundew_sets(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     }
 
     for (i = 1; i < cf->args->nelts; i++) {
-        idx = ngx_sundew_add_set(cf, &value[i], SW_ROLE_LOOKUP);
+        idx = ngx_sundew_add_set(cf, &value[i],
+                                 SW_ROLE_LOOKUP
+                                 | (cmd->offset ? NGX_SUNDEW_ALLOWLIST : 0));
         if (idx == NGX_ERROR) {
             return NGX_CONF_ERROR;
         }
@@ -909,6 +1200,266 @@ ngx_http_sundew_status(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     }
 
     slcf->status = n;
+
+    return NGX_CONF_OK;
+}
+
+
+static ngx_int_t
+ngx_http_sundew_parse_status(ngx_conf_t *cf, ngx_str_t *v, ngx_uint_t *status)
+{
+    ngx_int_t  n;
+
+    n = ngx_atoi(v->data, v->len);
+
+    if (n != NGX_HTTP_CLOSE && (n < 400 || n > 599)) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid status \"%V\": use 4xx, 5xx or 444", v);
+        return NGX_ERROR;
+    }
+
+    *status = n;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_sundew_parse_timeout(ngx_conf_t *cf, ngx_str_t *v, ngx_uint_t *t)
+{
+    time_t  s;
+
+    s = ngx_parse_time(v, 1);
+
+    if (s == (time_t) NGX_ERROR || s < 1 || s > SW_MAX_TIMEOUT) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid time \"%V\": use 1s to 24d", v);
+        return NGX_ERROR;
+    }
+
+    *t = (ngx_uint_t) s;
+
+    return NGX_OK;
+}
+
+
+static char *
+ngx_http_sundew_autoadd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_sundew_loc_conf_t *slcf = conf;
+
+    ngx_int_t                          n, rule;
+    ngx_str_t                         *value, v;
+    ngx_uint_t                         i, timeout, prefix4, prefix6;
+    ngx_http_compile_complex_value_t   ccv;
+
+    if (slcf->autoadd != NGX_CONF_UNSET) {
+        return "is duplicate";
+    }
+
+    value = cf->args->elts;
+
+    if (cf->args->nelts == 2 && ngx_strcmp(value[1].data, "off") == 0) {
+        slcf->autoadd = -1;
+        return NGX_CONF_OK;
+    }
+
+    timeout = 0;
+    prefix4 = 32;
+    prefix6 = 128;
+    slcf->autoadd_status = NGX_HTTP_NOT_FOUND;
+
+    for (i = 2; i < cf->args->nelts; i++) {
+
+        if (ngx_strncmp(value[i].data, "timeout=", 8) == 0) {
+            v.data = value[i].data + 8;
+            v.len = value[i].len - 8;
+
+            if (ngx_http_sundew_parse_timeout(cf, &v, &timeout) != NGX_OK) {
+                return NGX_CONF_ERROR;
+            }
+
+            continue;
+        }
+
+        if (ngx_strncmp(value[i].data, "status=", 7) == 0) {
+            v.data = value[i].data + 7;
+            v.len = value[i].len - 7;
+
+            if (ngx_http_sundew_parse_status(cf, &v, &slcf->autoadd_status)
+                != NGX_OK)
+            {
+                return NGX_CONF_ERROR;
+            }
+
+            continue;
+        }
+
+        if (ngx_strncmp(value[i].data, "prefix4=", 8) == 0
+            || ngx_strncmp(value[i].data, "prefix6=", 8) == 0)
+        {
+            n = ngx_atoi(value[i].data + 8, value[i].len - 8);
+
+            if (value[i].data[6] == '4') {
+                if (n < 1 || n > 32) {
+                    return "has an invalid prefix4=, use 1-32";
+                }
+
+                prefix4 = n;
+
+            } else {
+                if (n < 1 || n > 128) {
+                    return "has an invalid prefix6=, use 1-128";
+                }
+
+                prefix6 = n;
+            }
+
+            continue;
+        }
+
+        if (ngx_strncmp(value[i].data, "if=", 3) == 0) {
+            v.data = value[i].data + 3;
+            v.len = value[i].len - 3;
+
+            slcf->autoadd_if = ngx_palloc(cf->pool,
+                                          sizeof(ngx_http_complex_value_t));
+            if (slcf->autoadd_if == NULL) {
+                return NGX_CONF_ERROR;
+            }
+
+            ngx_memzero(&ccv, sizeof(ngx_http_compile_complex_value_t));
+            ccv.cf = cf;
+            ccv.value = &v;
+            ccv.complex_value = slcf->autoadd_if;
+
+            if (ngx_http_compile_complex_value(&ccv) != NGX_OK) {
+                return NGX_CONF_ERROR;
+            }
+
+            continue;
+        }
+
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid parameter \"%V\"", &value[i]);
+        return NGX_CONF_ERROR;
+    }
+
+    rule = ngx_sundew_add_rule(cf, &value[1], prefix4, prefix6, timeout);
+    if (rule == NGX_ERROR) {
+        return NGX_CONF_ERROR;
+    }
+
+    slcf->autoadd = rule;
+
+    return NGX_CONF_OK;
+}
+
+
+static char *
+ngx_http_sundew_ratelimit(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_sundew_loc_conf_t *slcf = conf;
+
+    ngx_int_t          n, rule;
+    ngx_str_t         *value, v, set;
+    ngx_uint_t         i, ban_time;
+    ngx_msec_t         ms;
+    static ngx_uint_t  next_id;
+
+    if (slcf->rl_id != NGX_CONF_UNSET) {
+        return "is duplicate";
+    }
+
+    value = cf->args->elts;
+
+    if (cf->args->nelts == 2 && ngx_strcmp(value[1].data, "off") == 0) {
+        slcf->rl_id = -1;
+        return NGX_CONF_OK;
+    }
+
+    slcf->rl_rate = 0;
+    slcf->rl_window = 60000;
+    slcf->rl_key6 = 64;
+    slcf->rl_rule = -1;
+    ban_time = 3600;
+    ngx_str_null(&set);
+
+    for (i = 1; i < cf->args->nelts; i++) {
+
+        if (ngx_strncmp(value[i].data, "rate=", 5) == 0) {
+            n = ngx_atoi(value[i].data + 5, value[i].len - 5);
+            if (n < 1 || n > 65535) {
+                return "has an invalid rate=, use 1-65535";
+            }
+
+            slcf->rl_rate = n;
+            continue;
+        }
+
+        if (ngx_strncmp(value[i].data, "window=", 7) == 0) {
+            v.data = value[i].data + 7;
+            v.len = value[i].len - 7;
+
+            ms = ngx_parse_time(&v, 0);
+            if (ms == (ngx_msec_t) NGX_ERROR || ms < 1000 || ms > 86400000) {
+                return "has an invalid window=, use 1s to 1d";
+            }
+
+            slcf->rl_window = ms;
+            continue;
+        }
+
+        if (ngx_strncmp(value[i].data, "autoban=", 8) == 0) {
+            set.data = value[i].data + 8;
+            set.len = value[i].len - 8;
+            continue;
+        }
+
+        if (ngx_strncmp(value[i].data, "ban_time=", 9) == 0) {
+            v.data = value[i].data + 9;
+            v.len = value[i].len - 9;
+
+            if (ngx_http_sundew_parse_timeout(cf, &v, &ban_time) != NGX_OK) {
+                return NGX_CONF_ERROR;
+            }
+
+            continue;
+        }
+
+        if (ngx_strncmp(value[i].data, "key6=", 5) == 0) {
+            n = ngx_atoi(value[i].data + 5, value[i].len - 5);
+            if (n < 1 || n > 128) {
+                return "has an invalid key6=, use 1-128";
+            }
+
+            slcf->rl_key6 = n;
+            continue;
+        }
+
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "invalid parameter \"%V\"", &value[i]);
+        return NGX_CONF_ERROR;
+    }
+
+    if (slcf->rl_rate == 0) {
+        return "needs rate=";
+    }
+
+    if (set.len) {
+        rule = ngx_sundew_add_rule(cf, &set, 32, 128, ban_time);
+        if (rule == NGX_ERROR) {
+            return NGX_CONF_ERROR;
+        }
+
+        slcf->rl_rule = rule;
+    }
+
+    if (ngx_sundew_ratelimit_zone(cf) == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    slcf->rl_id = next_id++;
 
     return NGX_CONF_OK;
 }

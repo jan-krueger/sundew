@@ -1,6 +1,6 @@
 ngx_addon_name=ngx_http_sundew_module
 
-SUNDEW_DEPS="$ngx_addon_dir/src/ngx_sundew.h $ngx_addon_dir/src/sw_proto.h $ngx_addon_dir/src/sw_client.h $ngx_addon_dir/src/sw_cache.h $ngx_addon_dir/src/sw_stats.h $ngx_addon_dir/src/sw_siphash.h"
+SUNDEW_DEPS="$ngx_addon_dir/src/ngx_sundew.h $ngx_addon_dir/src/sw_proto.h $ngx_addon_dir/src/sw_client.h $ngx_addon_dir/src/sw_cache.h $ngx_addon_dir/src/sw_stats.h $ngx_addon_dir/src/sw_siphash.h $ngx_addon_dir/src/sw_ratelimit.h"
 
 if test -n "$ngx_module_link" -a "$ngx_module_link" = DYNAMIC; then
     ngx_module_type=HTTP
@@ -11,6 +11,7 @@ if test -n "$ngx_module_link" -a "$ngx_module_link" = DYNAMIC; then
                      $ngx_addon_dir/src/sw_client.c \
                      $ngx_addon_dir/src/sw_cache.c \
                      $ngx_addon_dir/src/sw_stats.c \
+                     $ngx_addon_dir/src/sw_ratelimit.c \
                      $ngx_addon_dir/src/ngx_sundew_core_module.c"
     ngx_module_libs=
     ngx_module_order="ngx_http_sundew_module ngx_http_realip_module"
@@ -21,7 +22,7 @@ else
     ngx_module_name=ngx_sundew_core_module
     ngx_module_incs="$ngx_addon_dir/src"
     ngx_module_deps="$SUNDEW_DEPS"
-    ngx_module_srcs="$ngx_addon_dir/src/ngx_sundew_core_module.c $ngx_addon_dir/src/sw_client.c $ngx_addon_dir/src/sw_cache.c $ngx_addon_dir/src/sw_stats.c"
+    ngx_module_srcs="$ngx_addon_dir/src/ngx_sundew_core_module.c $ngx_addon_dir/src/sw_client.c $ngx_addon_dir/src/sw_cache.c $ngx_addon_dir/src/sw_stats.c $ngx_addon_dir/src/sw_ratelimit.c"
     ngx_module_libs=
     ngx_module_order=
 

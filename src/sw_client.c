@@ -27,7 +27,8 @@ typedef struct {
     uint32_t         req_id;            /* 0 = free */
     uint32_t         hash;
     ngx_uint_t       late;              /* timed out, waiting for the answer */
-    uint64_t         mask;
+    ngx_uint_t       op;
+    uint64_t         mask;              /* TEST: sets; ADD: rule */
     ngx_uint_t       family;
     u_char           addr[16];
 } sw_pending_t;
@@ -50,6 +51,7 @@ static void sw_client_complete(sw_pending_t *p, ngx_uint_t result,
     uint64_t decided, uint64_t matched);
 static void sw_client_fail_all(ngx_uint_t result);
 static void sw_client_log(ngx_log_t *log, sw_rep_t *rep);
+static void sw_client_release(sw_pending_t *p);
 
 
 static sw_client_t  *sw_client;
@@ -115,20 +117,27 @@ sw_client_init(ngx_cycle_t *cycle, ngx_fd_t fd)
 
 
 static uint32_t
-sw_client_hash(uint64_t mask, ngx_uint_t family, const u_char *addr)
+sw_client_hash(ngx_uint_t op, uint64_t mask, ngx_uint_t family,
+    const u_char *addr)
 {
     uint32_t  h;
 
     h = ngx_crc32_short((u_char *) &mask, sizeof(uint64_t));
     h ^= ngx_crc32_short((u_char *) addr, family == 4 ? 4 : 16);
 
-    return h;
+    return h ^ (uint32_t) (op * 0x9e3779b9);
 }
 
 
-ngx_int_t
-sw_client_submit(sw_waiter_t *w, uint64_t mask, ngx_uint_t family,
-    const u_char *addr, ngx_msec_t timeout)
+/*
+ * NGX_OK: a new request was sent; NGX_AGAIN: the same request is already on
+ * its way; NGX_DECLINED: nothing sent, *result says why.
+ */
+
+static ngx_int_t
+sw_client_request(ngx_uint_t op, uint64_t mask, ngx_uint_t family,
+    const u_char *addr, ngx_msec_t timeout, sw_pending_t **pp,
+    ngx_uint_t *result)
 {
     size_t         len;
     uint32_t       hash;
@@ -138,13 +147,12 @@ sw_client_submit(sw_waiter_t *w, uint64_t mask, ngx_uint_t family,
     sw_pending_t  *p;
 
     if (sw_client == NULL || sw_client->down) {
-        sw_stats_inc(SW_STAT_HELPER_DOWN);
-        w->result = SW_RESULT_DOWN;
+        *result = SW_RESULT_DOWN;
         return NGX_DECLINED;
     }
 
     len = (family == 4) ? 4 : 16;
-    hash = sw_client_hash(mask, family, addr);
+    hash = sw_client_hash(op, mask, family, addr);
     bucket = &sw_client->buckets[hash % SW_BUCKETS];
 
     for (q = ngx_queue_head(bucket);
@@ -153,19 +161,16 @@ sw_client_submit(sw_waiter_t *w, uint64_t mask, ngx_uint_t family,
     {
         p = ngx_queue_data(q, sw_pending_t, link);
 
-        if (p->hash == hash && p->mask == mask && p->family == family
-            && ngx_memcmp(p->addr, addr, len) == 0)
+        if (p->hash == hash && p->op == op && p->mask == mask
+            && p->family == family && ngx_memcmp(p->addr, addr, len) == 0)
         {
-            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
-                           "sundew coalesce req_id:%uD", p->req_id);
-            sw_stats_inc(SW_STAT_COALESCED);
-            goto join;
+            *pp = p;
+            return NGX_AGAIN;
         }
     }
 
     if (ngx_queue_empty(&sw_client->free)) {
-        sw_stats_inc(SW_STAT_BUSY);
-        w->result = SW_RESULT_BUSY;
+        *result = SW_RESULT_BUSY;
         return NGX_DECLINED;
     }
 
@@ -181,7 +186,7 @@ sw_client_submit(sw_waiter_t *w, uint64_t mask, ngx_uint_t family,
     ngx_memzero(&req, sizeof(sw_req_t));
     req.magic = SW_FRAME_MAGIC;
     req.version = SW_PROTO_VERSION;
-    req.op = SW_OP_TEST;
+    req.op = (uint8_t) op;
     req.req_id = p->req_id;
     req.arg = mask;
     req.family = (uint8_t) family;
@@ -195,18 +200,18 @@ sw_client_submit(sw_waiter_t *w, uint64_t mask, ngx_uint_t family,
         ngx_log_error(NGX_LOG_ERR, ngx_cycle->log, err,
                       "sundew: send to helper failed");
         p->req_id = 0;
-        w->result = (err == NGX_EAGAIN) ? SW_RESULT_BUSY : SW_RESULT_DOWN;
+        *result = (err == NGX_EAGAIN) ? SW_RESULT_BUSY : SW_RESULT_DOWN;
         return NGX_DECLINED;
     }
 
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
-                   "sundew submit req_id:%uD", p->req_id);
-    sw_stats_inc(SW_STAT_LOOKUPS);
+    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
+                   "sundew submit op:%ui req_id:%uD", op, p->req_id);
 
     ngx_queue_remove(&p->link);
     ngx_queue_insert_tail(bucket, &p->link);
 
     p->hash = hash;
+    p->op = op;
     p->mask = mask;
     p->family = family;
     ngx_memzero(p->addr, sizeof(p->addr));
@@ -215,12 +220,102 @@ sw_client_submit(sw_waiter_t *w, uint64_t mask, ngx_uint_t family,
     ngx_add_timer(&p->timer, timeout);
     sw_client->npending++;
 
-join:
+    *pp = p;
+
+    return NGX_OK;
+}
+
+
+ngx_int_t
+sw_client_submit(sw_waiter_t *w, uint64_t mask, ngx_uint_t family,
+    const u_char *addr, ngx_msec_t timeout)
+{
+    ngx_int_t      rc;
+    ngx_uint_t     result;
+    sw_pending_t  *p;
+
+    rc = sw_client_request(SW_OP_TEST, mask, family, addr, timeout, &p,
+                           &result);
+
+    switch (rc) {
+
+    case NGX_DECLINED:
+        sw_stats_inc(result == SW_RESULT_DOWN ? SW_STAT_HELPER_DOWN
+                                              : SW_STAT_BUSY);
+        w->result = result;
+        return NGX_DECLINED;
+
+    case NGX_AGAIN:
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
+                       "sundew coalesce req_id:%uD", p->req_id);
+        sw_stats_inc(SW_STAT_COALESCED);
+        break;
+
+    default:
+        sw_stats_inc(SW_STAT_LOOKUPS);
+    }
 
     w->pending = p;
     ngx_queue_insert_tail(&p->waiters, &w->link);
 
     return NGX_OK;
+}
+
+
+void
+sw_client_add(ngx_uint_t rule, ngx_uint_t family, const u_char *addr)
+{
+    ngx_int_t      rc;
+    ngx_uint_t     result;
+    sw_pending_t  *p;
+
+    rc = sw_client_request(SW_OP_ADD, rule, family, addr, 2000, &p, &result);
+
+    if (rc == NGX_DECLINED) {
+        sw_stats_inc(SW_STAT_ADDS_FAILED);
+        ngx_log_error(NGX_LOG_WARN, ngx_cycle->log, 0,
+                      "sundew: could not ask the helper to add an address: %s",
+                      result == SW_RESULT_DOWN ? "helper down" : "busy");
+    }
+}
+
+
+static void
+sw_client_add_done(sw_pending_t *p, ngx_uint_t status, uint64_t decided)
+{
+    u_char                   addr[16];
+    ngx_sundew_set_t        *set;
+    ngx_sundew_rule_t       *rule;
+    ngx_sundew_core_conf_t  *scf;
+
+    if (p->timer.timer_set) {
+        ngx_del_timer(&p->timer);
+    }
+
+    scf = (ngx_sundew_core_conf_t *) ngx_get_conf(ngx_cycle->conf_ctx,
+                                                  ngx_sundew_core_module);
+
+    if (status == SW_ST_OK && decided && p->mask < scf->rules.nelts) {
+        sw_stats_inc(SW_STAT_ADDS);
+
+        rule = scf->rules.elts;
+        set = scf->sets.elts;
+
+        if (scf->cache_zone && scf->cache_zone->data) {
+            sw_cache_addr(addr, p->family, p->addr);
+            sw_cache_put(scf->cache_zone, set[rule[p->mask].set].ident, addr,
+                         SW_VERDICT_IN, rule[p->mask].timeout);
+        }
+
+    } else if (status == SW_ST_DENIED) {
+        sw_stats_inc(SW_STAT_ADDS_REFUSED);
+
+    } else {
+        sw_stats_inc(SW_STAT_ADDS_FAILED);
+    }
+
+    ngx_queue_remove(&p->link);
+    sw_client_release(p);
 }
 
 
@@ -256,7 +351,8 @@ sw_client_store(sw_pending_t *p, uint64_t decided, uint64_t matched)
         if (decided & p->mask & ((uint64_t) 1 << i)) {
             sw_cache_put(scf->cache_zone, set[i].ident, addr,
                          (matched & ((uint64_t) 1 << i)) ? SW_VERDICT_IN
-                                                         : SW_VERDICT_NOT_IN);
+                                                         : SW_VERDICT_NOT_IN,
+                         0);
         }
     }
 }
@@ -346,6 +442,11 @@ sw_client_timeout_handler(ngx_event_t *ev)
         return;
     }
 
+    if (p->op == SW_OP_ADD) {
+        sw_client_add_done(p, SW_ST_ERROR, 0);
+        return;
+    }
+
     ngx_log_error(NGX_LOG_INFO, ev->log, 0,
                   "sundew: lookup timed out (req_id %uD)", p->req_id);
 
@@ -363,7 +464,10 @@ sw_client_fail_all(ngx_uint_t result)
             continue;
         }
 
-        if (sw_client->entries[i].late) {
+        if (sw_client->entries[i].op == SW_OP_ADD) {
+            sw_client_add_done(&sw_client->entries[i], SW_ST_ERROR, 0);
+
+        } else if (sw_client->entries[i].late) {
             sw_client_late(&sw_client->entries[i], result, 0, 0);
 
         } else {
@@ -442,6 +546,11 @@ sw_client_read_handler(ngx_event_t *rev)
                        "sundew reply req_id:%uD decided:%uL matched:%uL",
                        rep.req_id, rep.decided, rep.matched);
 
+        if (p->op == SW_OP_ADD) {
+            sw_client_add_done(p, rep.status, rep.decided);
+            continue;
+        }
+
         if (p->late) {
             ngx_log_debug1(NGX_LOG_DEBUG_HTTP, rev->log, 0,
                            "sundew late reply req_id:%uD cached", rep.req_id);
@@ -465,6 +574,7 @@ sw_client_log(ngx_log_t *log, sw_rep_t *rep)
     ngx_str_t               *name, unknown = ngx_string("?");
     ngx_uint_t               level, idx;
     ngx_sundew_set_t        *set;
+    ngx_sundew_rule_t       *rule;
     ngx_sundew_core_conf_t  *scf;
     static const char       *violation[] = { "?", "wrong size", "malformed",
                                              "sets not in the configuration" };
@@ -533,6 +643,43 @@ sw_client_log(ngx_log_t *log, sw_rep_t *rep)
                       "sundew: helper engine crashed %uL times in a row; the "
                       "helper stopped, lookups follow the fail policy until "
                       "the next reload", rep->matched);
+        break;
+
+    case SW_LOG_ADD_PROTECTED:
+    case SW_LOG_ADD_BUDGET:
+    case SW_LOG_ADD_BREAKER:
+    case SW_LOG_ADD_FAILED:
+        idx = (ngx_uint_t) (rep->matched & 0xffffffff);
+        rule = scf->rules.elts;
+        name = (idx < scf->rules.nelts) ? &set[rule[idx].set].name : &unknown;
+
+        if (rep->decided == SW_LOG_ADD_PROTECTED) {
+            ngx_log_error(level, log, 0,
+                          "sundew: helper refused to add a protected address "
+                          "to set \"%V\" (sundew_protect)", name);
+
+        } else if (rep->decided == SW_LOG_ADD_BUDGET) {
+            ngx_log_error(level, log, 0,
+                          "sundew: helper refused adds to set \"%V\": over "
+                          "20 per second", name);
+
+        } else if (rep->decided == SW_LOG_ADD_BREAKER) {
+            ngx_log_error(level, log, 0,
+                          "sundew: more than 1000 adds to set \"%V\" in a "
+                          "minute; adds to it are paused for 10 minutes", name);
+
+        } else {
+            ngx_log_error(level, log, 0,
+                          "sundew: adding to set \"%V\" failed: kernel error "
+                          "%uD", name, (uint32_t) (rep->matched >> 32));
+        }
+
+        break;
+
+    case SW_LOG_SET_FULL:
+        ngx_log_error(level, log, 0,
+                      "sundew: set \"%V\" is full (maxelem); nothing more "
+                      "can be added", name);
         break;
 
     case SW_LOG_LANDLOCK:

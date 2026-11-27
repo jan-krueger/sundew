@@ -13,7 +13,9 @@
 const char  *sw_stat_names[SW_STAT_N] = {
     "checked", "allowed", "denied", "dryrun", "fail_open", "fail_closed",
     "stale_served", "cache_hit", "cache_miss", "lookups", "coalesced",
-    "timeouts", "helper_errors", "helper_down", "busy", "late_replies"
+    "timeouts", "helper_errors", "helper_down", "busy", "late_replies",
+    "ratelimited", "trapped", "adds", "adds_refused", "adds_failed",
+    "adds_skipped"
 };
 
 
@@ -33,7 +35,13 @@ const char  *sw_stat_help[SW_STAT_N] = {
     "Questions the helper answered with an error.",
     "Questions that could not be sent because the helper is gone.",
     "Questions not sent because too many were in flight.",
-    "Answers that arrived after their timeout and were still cached."
+    "Answers that arrived after their timeout and were still cached.",
+    "Requests over an ipset_ratelimit rate.",
+    "Requests to an ipset_autoadd location.",
+    "Addresses added to a set.",
+    "Adds the helper refused: protected address, budget or circuit breaker.",
+    "Adds that failed: kernel error, set full or missing, helper unavailable.",
+    "Adds not sent: dry run, browser request, early data or if=."
 };
 
 

@@ -38,5 +38,6 @@ ngx_int_t sw_client_init(ngx_cycle_t *cycle, ngx_fd_t fd);
 ngx_int_t sw_client_submit(sw_waiter_t *w, uint64_t mask, ngx_uint_t family,
     const u_char *addr, ngx_msec_t timeout);
 void sw_client_cancel(sw_waiter_t *w);
+void sw_client_add(ngx_uint_t rule, ngx_uint_t family, const u_char *addr);
 
 #endif /* SW_CLIENT_H */

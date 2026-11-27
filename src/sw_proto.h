@@ -11,10 +11,13 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define SW_PROTO_VERSION        1
+#define SW_PROTO_VERSION        2
 #define SW_FRAME_MAGIC          0x5357          /* "SW" */
 #define SW_MAX_SETS             64
 #define SW_SETNAME_LEN          32              /* IPSET_MAXNAMELEN */
+#define SW_MAX_RULES            64
+#define SW_MAX_PROTECT          256
+#define SW_MAX_TIMEOUT          2147483         /* IPSET_MAX_TIMEOUT */
 
 /* helper fd layout */
 #define SW_FD_POLICY            3
@@ -25,9 +28,10 @@
 /* ---- policy (memfd, master -> helper, sealed) ------------------------ */
 
 #define SW_POLICY_MAGIC         0x4c505753      /* "SWPL" */
-#define SW_POLICY_VERSION       1
+#define SW_POLICY_VERSION       2
 
 #define SW_ROLE_LOOKUP          1
+#define SW_ROLE_ADD             2
 
 typedef struct {
     uint32_t  magic;
@@ -39,6 +43,9 @@ typedef struct {
     uint32_t  worker_uid;
     uint32_t  generation;
     uint32_t  debug_delay_ms;                   /* test builds only */
+    uint16_t  nrules;
+    uint16_t  nprotect;
+    uint32_t  zero;
 } sw_policy_hdr_t;
 
 typedef struct {
@@ -46,6 +53,25 @@ typedef struct {
     uint8_t   role;
     uint8_t   zero[7];
 } sw_policy_set_t;
+
+/* follows the sets */
+typedef struct {
+    uint8_t   set;
+    uint8_t   prefix4;
+    uint8_t   prefix6;
+    uint8_t   zero;
+    uint32_t  timeout;                          /* 0: the set's default */
+    uint32_t  rate;                             /* adds per second */
+    uint32_t  burst;
+} sw_policy_rule_t;
+
+/* follows the rules: the never-ban list */
+typedef struct {
+    uint8_t   family;                           /* 4 or 6 */
+    uint8_t   prefix;
+    uint8_t   zero[2];
+    uint8_t   addr[16];
+} sw_policy_protect_t;
 
 
 /* ---- ctl channel (master <-> helper) --------------------------------- */
@@ -64,12 +90,18 @@ typedef struct {
 } sw_ctl_hdr_t;
 
 typedef struct {
-    int32_t   err;                              /* 0, -errno or -IPSET_ERR_* */
+    int32_t   err;                              /* 0, -errno, -IPSET_ERR_*, SW_SETERR_* */
     uint8_t   family;                           /* AF_INET / AF_INET6 / 0 */
     uint8_t   revision;
-    uint8_t   zero[2];
+    uint8_t   has_timeout;
+    uint8_t   netmask;                          /* hash:ip netmask, 0 if none */
     char      type[SW_SETNAME_LEN];             /* e.g. "hash:ip" */
+    uint32_t  default_timeout;
+    uint32_t  zero;
 } sw_ready_set_t;
+
+#define SW_SETERR_NO_TIMEOUT    -9001           /* add target without timeout support */
+#define SW_SETERR_NEED_TIMEOUT  -9002           /* no timeout given and no set default */
 
 typedef struct {
     sw_ctl_hdr_t  hdr;                          /* type = SW_CTL_DRAIN */
@@ -89,6 +121,7 @@ typedef struct {
 /* ---- slot channels (worker <-> helper) ------------------------------- */
 
 #define SW_OP_TEST              1
+#define SW_OP_ADD               2
 
 #define SW_ST_OK                0
 #define SW_ST_BUSY              1
@@ -108,13 +141,18 @@ typedef struct {
 #define SW_LOG_ENGINE_EXIT      5       /* wait status */
 #define SW_LOG_LANDLOCK         6       /* errno */
 #define SW_LOG_GAVE_UP          7       /* crashes */
+#define SW_LOG_ADD_PROTECTED    8       /* rule */
+#define SW_LOG_ADD_BUDGET       9       /* rule */
+#define SW_LOG_ADD_BREAKER      10      /* rule */
+#define SW_LOG_ADD_FAILED       11      /* rule | errno << 32 */
+#define SW_LOG_SET_FULL         12      /* set index */
 
 typedef struct {
     uint16_t  magic;
     uint8_t   version;
     uint8_t   op;
     uint32_t  req_id;
-    uint64_t  arg;                              /* TEST: set bitmask */
+    uint64_t  arg;                              /* TEST: set bitmask; ADD: rule */
     uint8_t   family;                           /* 4 or 6 */
     uint8_t   zero0[7];
     uint8_t   addr[16];
@@ -131,10 +169,12 @@ typedef struct {
 } sw_rep_t;
 
 
-_Static_assert(sizeof(sw_policy_hdr_t) == 32, "policy hdr");
+_Static_assert(sizeof(sw_policy_hdr_t) == 40, "policy hdr");
+_Static_assert(sizeof(sw_policy_rule_t) == 16, "policy rule");
+_Static_assert(sizeof(sw_policy_protect_t) == 20, "policy protect");
 _Static_assert(sizeof(sw_policy_set_t) == 40, "policy set");
 _Static_assert(sizeof(sw_ctl_hdr_t) == 16, "ctl hdr");
-_Static_assert(sizeof(sw_ready_set_t) == 40, "ready set");
+_Static_assert(sizeof(sw_ready_set_t) == 48, "ready set");
 _Static_assert(sizeof(sw_drain_t) == 24, "drain");
 _Static_assert(sizeof(sw_req_t) == 48, "req");
 _Static_assert(offsetof(sw_req_t, arg) == 8, "req.arg");
