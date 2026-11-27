@@ -128,7 +128,7 @@ check "lookup after reloads" alive
 check "no zombies" wait_for '[ -z "$(ps -eo stat= | grep "^Z")" ]'
 
 echo "== hostile worker frames"
-for c in short long magic op family pad0 pad1 v4-trailing empty-mask mask-range cross-family ancillary; do
+for c in short long magic op family pad0 pad1 v4-trailing empty-mask mask-range cross-family add-unknown-rule add-rule-range ancillary; do
     old_workers=$(workers | tr '\n' ' ')
     kill -HUP "$(master)"
     wait_for '[ "$(count workers)" = 2 ] && [ "$(workers | tr "\n" " ")" != "'"$old_workers"'" ] && [ "$(count engines)" = 1 ]'

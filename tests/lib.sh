@@ -12,6 +12,7 @@ FAIL=0
 ok()   { PASS=$((PASS + 1)); echo "  ok   $*"; }
 bad()  { FAIL=$((FAIL + 1)); echo "  FAIL $*"; }
 check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
+not() { ! "$@"; }
 
 conf() {
     mkdir -p $RUN/www $RUN/san

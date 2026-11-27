@@ -10,7 +10,7 @@ SYS_pidfd_open = 434
 SYS_pidfd_getfd = 438
 libc = ctypes.CDLL(None, use_errno=True)
 
-MAGIC, VERSION, OP_TEST = 0x5357, 1, 1
+MAGIC, VERSION, OP_TEST, OP_ADD = 0x5357, 2, 1, 2
 
 
 def slot_of(pid):
@@ -76,6 +76,8 @@ CASES = {
     "empty-mask": lambda: frame(mask=0),
     "mask-range": lambda: frame(mask=1 << 40),
     "cross-family": lambda: frame(mask=0b10),
+    "add-unknown-rule": lambda: frame(op=OP_ADD, mask=5),
+    "add-rule-range": lambda: frame(op=OP_ADD, mask=1 << 40),
 }
 
 
