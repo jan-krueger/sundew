@@ -27,8 +27,8 @@ including `ipset_blacklist` and `ipset_whitelist`; Sundew's own names are
 `ipset_denylist` and `ipset_allowlist`. See
 [migration guide](docs/guides/migrate.md).
 
-**Status:** 0.1, the first release. It looks addresses up; `ipset_autoadd`
-and `ipset_ratelimit`, which add to sets, are planned for 0.2.
+**Status:** 0.2. Denylists and allowlists, honeypots (`ipset_autoadd`) and rate
+limiting with bans (`ipset_ratelimit`).
 
 ## Documentation
 

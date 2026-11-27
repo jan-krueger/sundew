@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-28
+
 ### Added
 - `ipset_autoadd set ... [timeout=] [status=] [prefix4=] [prefix6=] [if=]`: a
   honeypot location adds the client to the set of its address family and
@@ -73,5 +75,6 @@ The first release.
   and UndefinedBehaviorSanitizer, across reloads, binary upgrades, worker and
   helper crashes, client aborts and HTTP/2 and HTTP/3 stream resets.
 
-[Unreleased]: https://github.com/jan-krueger/sundew/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jan-krueger/sundew/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jan-krueger/sundew/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jan-krueger/sundew/releases/tag/v0.1.0
