@@ -5,22 +5,79 @@ use crate::nl::{self, Reply};
 use crate::proto::{self, Addr, Policy, ReadySet};
 use crate::sys::{self, CAP_NET_ADMIN, CapSets, bit};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetType {
+    HashIp,
+    HashNet,
+    BitmapIp,
+}
+
 struct SetInfo {
     name: Vec<u8>,
     family: u8, // NFPROTO_*, 0 = unusable
+    kind: SetType,
+    netmask: u8,
+    default_timeout: u32,
+}
+
+struct Rule {
+    set: usize,
+    prefix4: u8,
+    prefix6: u8,
+    timeout: u32,
+    rate: f64,
+    burst: f64,
+    tokens: f64,
+    refilled_ms: u64,
+    minute_start: u64,
+    minute_adds: u32,
+    paused_until: u64,
 }
 
 struct Engine {
-    last_log: [u64; 8],
+    last_log: [u64; 16],
     nl: i32,
     proto: u8,
     seq: u32,
     sets: Vec<SetInfo>,
+    rules: Vec<Rule>,
+    protect: Vec<proto::Cidr>,
+    recent: std::collections::HashMap<(usize, [u8; 16]), u64>,
+    draining: bool,
     rbuf: Vec<u8>,
 }
 
-const SUPPORTED_TYPES: &[&[u8]] = &[b"hash:ip", b"hash:net", b"bitmap:ip"];
 const NL_TIMEOUT_MS: i32 = 1000;
+const RECENT_MS: u64 = 10_000;
+const BREAKER_PER_MINUTE: u32 = 1000;
+const BREAKER_PAUSE_MS: u64 = 600_000;
+
+fn addr_bytes(addr: &Addr) -> ([u8; 16], bool) {
+    match addr {
+        Addr::V4(a) => {
+            let mut x = [0u8; 16];
+            x[..4].copy_from_slice(a);
+            (x, false)
+        }
+        Addr::V6(a) => (*a, true),
+    }
+}
+
+fn mask(addr: &mut [u8; 16], prefix: u8) {
+    for (i, b) in addr.iter_mut().enumerate() {
+        let bits = (prefix as usize).saturating_sub(i * 8).min(8);
+        *b &= if bits == 0 { 0 } else { 0xffu8 << (8 - bits) };
+    }
+}
+
+/// True if two prefixes of one family overlap: one contains the other.
+fn overlaps(a: &[u8; 16], alen: u8, b: &[u8; 16], blen: u8) -> bool {
+    let (mut x, mut y) = (*a, *b);
+    let len = alen.min(blen);
+    mask(&mut x, len);
+    mask(&mut y, len);
+    x == y
+}
 
 impl Engine {
     /// Log frame to a worker, at most one per event and second.
@@ -39,7 +96,8 @@ impl Engine {
         self.seq
     }
 
-    /// Errno per message, or the errno of the failure.
+    /// Errno per message, or the errno of the failure. A message completes
+    /// with its ACK, or with DONE for dumps.
     fn transact(
         &mut self,
         msgs: &[(u32, Vec<u8>)],
@@ -78,17 +136,19 @@ impl Engine {
                 }
             };
             for r in replies {
-                match r {
-                    Reply::Ack { seq, errno } => {
-                        if let Some(i) = msgs.iter().position(|(s, _)| *s == seq) {
-                            if res[i].is_none() {
-                                res[i] = Some(errno);
-                                left -= 1;
-                            }
-                        }
+                let (seq, code) = match r {
+                    Reply::Ack { seq, errno } => (seq, errno),
+                    Reply::Done { seq } => (seq, 0),
+                    Reply::Data { seq, cmd, attrs } => {
+                        on_data(seq, cmd, attrs);
+                        continue;
                     }
-                    Reply::Data { seq, cmd, attrs } => on_data(seq, cmd, attrs),
-                    Reply::Done => {}
+                };
+                if let Some(i) = msgs.iter().position(|(s, _)| *s == seq) {
+                    if res[i].is_none() {
+                        res[i] = Some(code);
+                        left -= 1;
+                    }
                 }
             }
         }
@@ -125,14 +185,17 @@ impl Engine {
         (kmin, kmax)
     }
 
-    fn header(&mut self, name: &[u8]) -> ReadySet {
+    /// Type, family and create options of one set (header-only LIST).
+    fn describe(&mut self, name: &[u8]) -> (ReadySet, Option<SetType>) {
         let seq = self.next_seq();
         let mut rs = ReadySet::default();
-        let msg = nl::msg_header(seq, self.proto, name);
+        let mut messages = 0;
+        let msg = nl::msg_list_header(seq, self.proto, name);
         let r = self.transact(&[(seq, msg)], |_, cmd, attrs| {
-            if cmd != nl::IPSET_CMD_HEADER {
+            if cmd != nl::IPSET_CMD_LIST {
                 return;
             }
+            messages += 1;
             for (ty, v) in nl::attrs(attrs).flatten() {
                 match ty {
                     nl::IPSET_ATTR_TYPENAME => {
@@ -142,6 +205,18 @@ impl Engine {
                     }
                     nl::IPSET_ATTR_REVISION => rs.revision = v.first().copied().unwrap_or(0),
                     nl::IPSET_ATTR_FAMILY => rs.family = v.first().copied().unwrap_or(0),
+                    nl::IPSET_ATTR_DATA => {
+                        for (dty, dv) in nl::attrs(v).flatten() {
+                            match (dty, dv) {
+                                (nl::IPSET_ATTR_TIMEOUT, [a, b, c, d]) => {
+                                    rs.has_timeout = true;
+                                    rs.default_timeout = u32::from_be_bytes([*a, *b, *c, *d]);
+                                }
+                                (nl::IPSET_ATTR_NETMASK, [m, ..]) => rs.netmask = *m,
+                                _ => {}
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -150,15 +225,22 @@ impl Engine {
             Ok(v) => v[0],
             Err(e) => -e,
         };
-        if rs.err == 0 {
-            let tn = rs.type_name.split(|&c| c == 0).next().unwrap_or(&[]);
-            if !SUPPORTED_TYPES.contains(&tn)
-                || !(rs.family == nl::NFPROTO_IPV4 || rs.family == nl::NFPROTO_IPV6)
-            {
-                rs.err = -libc::EOPNOTSUPP;
-            }
+        if rs.err == 0 && messages != 1 {
+            rs.err = -libc::EPROTO;
         }
-        rs
+        let tn = rs.type_name.split(|&c| c == 0).next().unwrap_or(&[]);
+        let kind = match tn {
+            b"hash:ip" => Some(SetType::HashIp),
+            b"hash:net" => Some(SetType::HashNet),
+            b"bitmap:ip" => Some(SetType::BitmapIp),
+            _ => None,
+        };
+        if rs.err == 0
+            && (kind.is_none() || !(rs.family == nl::NFPROTO_IPV4 || rs.family == nl::NFPROTO_IPV6))
+        {
+            rs.err = -libc::EOPNOTSUPP;
+        }
+        (rs, kind)
     }
 
     /// (status, decided, matched); problems are logged to `fd`.
@@ -204,14 +286,143 @@ impl Engine {
     }
 
     fn mask_valid(&self, mask: u64, addr: &Addr) -> bool {
-        let fam = match addr {
-            Addr::V4(_) => nl::NFPROTO_IPV4,
-            Addr::V6(_) => nl::NFPROTO_IPV6,
-        };
+        let fam = family_of(addr);
         if self.sets.len() < 64 && mask >> self.sets.len() != 0 {
             return false;
         }
         (0..self.sets.len()).all(|i| mask & (1u64 << i) == 0 || self.sets[i].family == fam)
+    }
+
+    fn rule_valid(&self, rule: u64, addr: &Addr) -> bool {
+        (rule as usize) < self.rules.len()
+            && self.sets[self.rules[rule as usize].set].family == family_of(addr)
+    }
+
+    /// Token bucket and circuit breaker of one rule.
+    fn admit(&mut self, fd: i32, r: usize, now: u64) -> bool {
+        let rule = &mut self.rules[r];
+        if now < rule.paused_until {
+            return false;
+        }
+        if now.saturating_sub(rule.minute_start) >= 60_000 {
+            rule.minute_start = now;
+            rule.minute_adds = 0;
+        }
+        rule.tokens = (rule.tokens
+            + now.saturating_sub(rule.refilled_ms) as f64 * rule.rate / 1000.0)
+            .min(rule.burst);
+        rule.refilled_ms = now;
+        if rule.tokens < 1.0 {
+            self.log(fd, proto::LVL_WARN, proto::LOG_ADD_BUDGET, r as u64);
+            return false;
+        }
+        rule.tokens -= 1.0;
+        rule.minute_adds += 1;
+        if rule.minute_adds > BREAKER_PER_MINUTE {
+            rule.paused_until = now + BREAKER_PAUSE_MS;
+            self.log(fd, proto::LVL_ALERT, proto::LOG_ADD_BREAKER, r as u64);
+            return false;
+        }
+        true
+    }
+
+    /// (status, decided)
+    fn add(&mut self, fd: i32, r: usize, addr: &Addr) -> (u8, u64) {
+        if self.draining {
+            return (proto::ST_DRAINING, 0);
+        }
+        let rule = &self.rules[r];
+        let set = &self.sets[rule.set];
+        let (mut elem, v6) = addr_bytes(addr);
+        let host = if v6 { 128 } else { 32 };
+        let (prefix, cidr) = match set.kind {
+            SetType::HashNet => {
+                let p = if v6 { rule.prefix6 } else { rule.prefix4 };
+                (p, (p < host).then_some(p))
+            }
+            SetType::HashIp if set.netmask != 0 => (set.netmask.min(host), None),
+            _ => (host, None),
+        };
+        mask(&mut elem, prefix);
+
+        if self
+            .protect
+            .iter()
+            .any(|c| c.v6 == v6 && overlaps(&elem, prefix, &c.addr, c.prefix))
+        {
+            self.log(fd, proto::LVL_WARN, proto::LOG_ADD_PROTECTED, r as u64);
+            return (proto::ST_DENIED, 0);
+        }
+
+        let now = sys::monotonic_ms();
+        if let Some(&t) = self.recent.get(&(r, elem)) {
+            if now.saturating_sub(t) < RECENT_MS {
+                return (proto::ST_OK, 1);
+            }
+        }
+        if !self.admit(fd, r, now) {
+            return (proto::ST_DENIED, 0);
+        }
+
+        let rule = &self.rules[r];
+        let timeout = rule.timeout;
+        let set_idx = rule.set;
+        let target = if v6 {
+            Addr::V6(elem)
+        } else {
+            Addr::V4([elem[0], elem[1], elem[2], elem[3]])
+        };
+        let seq = self.next_seq();
+        let msg = nl::msg_add(
+            seq,
+            self.proto,
+            &self.sets[set_idx].name,
+            &target,
+            cidr,
+            timeout,
+        );
+        let res = match self.transact(&[(seq, msg)], |_, _, _| {}) {
+            Ok(v) => v[0],
+            Err(errno) => {
+                self.log(fd, proto::LVL_ERR, proto::LOG_NETLINK, errno as u64);
+                return (proto::ST_ERROR, 0);
+            }
+        };
+        match res {
+            0 => {}
+            e if e == -nl::IPSET_ERR_EXIST => {}
+            e if e == -libc::ENOENT => {
+                self.log(fd, proto::LVL_ERR, proto::LOG_SET_MISSING, set_idx as u64);
+                return (proto::ST_SET_MISSING, 0);
+            }
+            e if e == -nl::IPSET_ERR_HASH_FULL => {
+                self.log(fd, proto::LVL_ERR, proto::LOG_SET_FULL, set_idx as u64);
+                return (proto::ST_ERROR, 0);
+            }
+            e => {
+                self.log(
+                    fd,
+                    proto::LVL_ERR,
+                    proto::LOG_ADD_FAILED,
+                    r as u64 | ((-e) as u32 as u64) << 32,
+                );
+                return (proto::ST_ERROR, 0);
+            }
+        }
+
+        if self.recent.len() > 4096 {
+            self.recent
+                .retain(|_, t| now.saturating_sub(*t) < RECENT_MS);
+        }
+        self.recent.insert((r, elem), now);
+        (proto::ST_OK, 1)
+    }
+}
+
+fn family_of(addr: &Addr) -> u8 {
+    match addr {
+        Addr::V4(_) => nl::NFPROTO_IPV4,
+        Addr::V6(_) => nl::NFPROTO_IPV6,
     }
 }
 
@@ -319,11 +530,15 @@ pub fn run(restarted: bool) -> ! {
         .unwrap_or_else(|e| fail(proto::ERR_NETLINK, "netlink socket", Some(e)));
 
     let mut eng = Engine {
-        last_log: [0; 8],
+        last_log: [0; 16],
         nl: nlfd,
         proto: nl::IPSET_PROTOCOL,
         seq: 0,
         sets: Vec::new(),
+        rules: Vec::new(),
+        protect: policy.protect.clone(),
+        recent: std::collections::HashMap::new(),
+        draining: false,
         rbuf: vec![0u8; 65536],
     };
     let (kmin, kmax) = eng.negotiate();
@@ -331,12 +546,44 @@ pub fn run(restarted: bool) -> ! {
 
     let mut ready = Vec::new();
     for s in &policy.sets {
-        let rs = eng.header(&s.name);
+        let (mut rs, kind) = eng.describe(&s.name);
+        if rs.err == 0 && s.role & proto::ROLE_ADD != 0 && !rs.has_timeout {
+            rs.err = proto::SETERR_NO_TIMEOUT;
+        }
         eng.sets.push(SetInfo {
             name: s.name.clone(),
             family: if rs.err == 0 { rs.family } else { 0 },
+            kind: kind.unwrap_or(SetType::HashIp),
+            netmask: rs.netmask,
+            default_timeout: rs.default_timeout,
         });
         ready.push(rs);
+    }
+
+    let now = sys::monotonic_ms();
+    for r in &policy.rules {
+        let set = &eng.sets[r.set];
+        let timeout = if r.timeout != 0 {
+            r.timeout
+        } else {
+            set.default_timeout
+        };
+        if ready[r.set].err == 0 && timeout == 0 {
+            ready[r.set].err = proto::SETERR_NEED_TIMEOUT;
+        }
+        eng.rules.push(Rule {
+            set: r.set,
+            prefix4: r.prefix4,
+            prefix6: r.prefix6,
+            timeout: timeout.min(proto::MAX_TIMEOUT),
+            rate: r.rate as f64,
+            burst: r.burst as f64,
+            tokens: r.burst as f64,
+            refilled_ms: now,
+            minute_start: now,
+            minute_adds: 0,
+            paused_until: 0,
+        });
     }
 
     if !restarted {
@@ -421,7 +668,10 @@ pub fn run(restarted: bool) -> ! {
                     Ok((len, flags)) if flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) == 0 => {
                         match proto::decode_drain(&fbuf[..len.min(fbuf.len())]) {
                             Ok(0) => sys::exit(0),
-                            Ok(s) => deadline = Some(sys::monotonic_ms() + s as u64 * 1000),
+                            Ok(s) => {
+                                eng.draining = true;
+                                deadline = Some(sys::monotonic_ms() + s as u64 * 1000);
+                            }
                             Err(e) => log!("bad ctl frame: {e}"),
                         }
                     }
@@ -442,9 +692,19 @@ pub fn run(restarted: bool) -> ! {
                             Some(violation(proto::VIOLATION_SIZE))
                         } else {
                             match proto::decode_req(&fbuf[..len]) {
-                                Ok(req) if eng.mask_valid(req.mask, &req.addr) => {
-                                    let (st, d, m) = eng.test(fd, req.mask, &req.addr);
-                                    let rep = proto::encode_rep(st, req.req_id, d, m);
+                                Ok(req)
+                                    if (req.op == proto::OP_TEST
+                                        && eng.mask_valid(req.arg, &req.addr))
+                                        || (req.op == proto::OP_ADD
+                                            && eng.rule_valid(req.arg, &req.addr)) =>
+                                {
+                                    let rep = if req.op == proto::OP_TEST {
+                                        let (st, d, m) = eng.test(fd, req.arg, &req.addr);
+                                        proto::encode_rep(st, req.req_id, d, m)
+                                    } else {
+                                        let (st, d) = eng.add(fd, req.arg as usize, &req.addr);
+                                        proto::encode_rep(st, req.req_id, d, 0)
+                                    };
                                     if delay > 0 {
                                         delayed.push_back((sys::monotonic_ms() + delay, fd, rep));
                                         continue;
@@ -482,5 +742,46 @@ pub fn run(restarted: bool) -> ! {
                 sys::exit(0);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn a4(x: [u8; 4]) -> [u8; 16] {
+        let mut a = [0u8; 16];
+        a[..4].copy_from_slice(&x);
+        a
+    }
+
+    #[test]
+    fn overlap() {
+        assert!(overlaps(&a4([10, 1, 2, 3]), 32, &a4([10, 0, 0, 0]), 8));
+        assert!(overlaps(&a4([10, 0, 0, 0]), 8, &a4([10, 1, 2, 3]), 32));
+        assert!(!overlaps(&a4([11, 0, 0, 1]), 32, &a4([10, 0, 0, 0]), 8));
+        // a /8 ban would cover a protected /16 inside it
+        assert!(overlaps(&a4([192, 0, 0, 0]), 8, &a4([192, 168, 0, 0]), 16));
+        assert!(!overlaps(
+            &a4([192, 0, 2, 1]),
+            32,
+            &a4([192, 168, 0, 0]),
+            16
+        ));
+    }
+
+    #[test]
+    fn masking() {
+        let mut a = a4([198, 51, 100, 77]);
+        mask(&mut a, 24);
+        assert_eq!(&a[..4], &[198, 51, 100, 0]);
+        let mut b = [0xffu8; 16];
+        mask(&mut b, 64);
+        assert_eq!(
+            b,
+            [
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0
+            ]
+        );
     }
 }

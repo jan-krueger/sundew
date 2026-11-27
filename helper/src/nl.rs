@@ -6,22 +6,30 @@ pub const IPSET_PROTOCOL: u8 = 7;
 pub const IPSET_PROTOCOL_MIN: u8 = 6;
 
 pub const IPSET_CMD_PROTOCOL: u16 = 1;
+pub const IPSET_CMD_LIST: u16 = 7;
+pub const IPSET_CMD_ADD: u16 = 9;
 pub const IPSET_CMD_TEST: u16 = 11;
-pub const IPSET_CMD_HEADER: u16 = 12;
 
 pub const IPSET_ATTR_PROTOCOL: u16 = 1;
 pub const IPSET_ATTR_SETNAME: u16 = 2;
 pub const IPSET_ATTR_TYPENAME: u16 = 3;
 pub const IPSET_ATTR_REVISION: u16 = 4;
 pub const IPSET_ATTR_FAMILY: u16 = 5;
+pub const IPSET_ATTR_FLAGS: u16 = 6;
 pub const IPSET_ATTR_DATA: u16 = 7;
 pub const IPSET_ATTR_PROTOCOL_MIN: u16 = 10;
 
 pub const IPSET_ATTR_IP: u16 = 1;
+pub const IPSET_ATTR_CIDR: u16 = 3;
+pub const IPSET_ATTR_TIMEOUT: u16 = 6;
+pub const IPSET_ATTR_NETMASK: u16 = 20;
+
+pub const IPSET_FLAG_LIST_HEADER: u32 = 1 << 2;
 pub const IPSET_ATTR_IPADDR_IPV4: u16 = 1;
 pub const IPSET_ATTR_IPADDR_IPV6: u16 = 2;
 
 pub const IPSET_ERR_EXIST: i32 = 4103;
+pub const IPSET_ERR_HASH_FULL: i32 = 4352;
 
 pub const NLA_F_NESTED: u16 = 1 << 15;
 pub const NLA_F_NET_BYTEORDER: u16 = 1 << 14;
@@ -29,6 +37,8 @@ const NLA_TYPE_MASK: u16 = !(NLA_F_NESTED | NLA_F_NET_BYTEORDER);
 
 pub const NLM_F_REQUEST: u16 = 0x1;
 pub const NLM_F_ACK: u16 = 0x4;
+pub const NLM_F_EXCL: u16 = 0x200;
+pub const NLM_F_DUMP: u16 = 0x300;
 
 pub const NLMSG_ERROR: u16 = 2;
 pub const NLMSG_DONE: u16 = 3;
@@ -118,15 +128,58 @@ pub fn msg_protocol(seq: u32) -> Vec<u8> {
     b.finish()
 }
 
-pub fn msg_header(seq: u32, proto: u8, set: &[u8]) -> Vec<u8> {
+/// Header-only LIST: type, family, revision and create options of one set.
+pub fn msg_list_header(seq: u32, proto: u8, set: &[u8]) -> Vec<u8> {
     let mut b = Builder::new(
-        IPSET_CMD_HEADER,
-        NLM_F_REQUEST | NLM_F_ACK,
+        IPSET_CMD_LIST,
+        NLM_F_REQUEST | NLM_F_DUMP,
         seq,
         NFPROTO_IPV4,
     );
     b.attr_u8(IPSET_ATTR_PROTOCOL, proto)
-        .attr_str(IPSET_ATTR_SETNAME, set);
+        .attr_str(IPSET_ATTR_SETNAME, set)
+        .attr(
+            IPSET_ATTR_FLAGS | NLA_F_NET_BYTEORDER,
+            &IPSET_FLAG_LIST_HEADER.to_be_bytes(),
+        );
+    b.finish()
+}
+
+/// ADD with NLM_F_EXCL: an existing element keeps its timeout. `cidr` only
+/// for hash:net; hash:ip would expand it into a range.
+pub fn msg_add(
+    seq: u32,
+    proto: u8,
+    set: &[u8],
+    addr: &crate::proto::Addr,
+    cidr: Option<u8>,
+    timeout: u32,
+) -> Vec<u8> {
+    use crate::proto::Addr;
+    let (fam, ty, bytes): (u8, u16, &[u8]) = match addr {
+        Addr::V4(a) => (NFPROTO_IPV4, IPSET_ATTR_IPADDR_IPV4, a),
+        Addr::V6(a) => (NFPROTO_IPV6, IPSET_ATTR_IPADDR_IPV6, a),
+    };
+    let mut b = Builder::new(
+        IPSET_CMD_ADD,
+        NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL,
+        seq,
+        fam,
+    );
+    b.attr_u8(IPSET_ATTR_PROTOCOL, proto)
+        .attr_str(IPSET_ATTR_SETNAME, set)
+        .nest(IPSET_ATTR_DATA)
+        .nest(IPSET_ATTR_IP)
+        .attr(ty | NLA_F_NET_BYTEORDER, bytes)
+        .end();
+    if let Some(c) = cidr {
+        b.attr_u8(IPSET_ATTR_CIDR, c);
+    }
+    b.attr(
+        IPSET_ATTR_TIMEOUT | NLA_F_NET_BYTEORDER,
+        &timeout.to_be_bytes(),
+    )
+    .end();
     b.finish()
 }
 
@@ -150,7 +203,7 @@ pub fn msg_test(seq: u32, proto: u8, set: &[u8], addr: &crate::proto::Addr) -> V
 #[derive(Debug)]
 pub enum Reply<'a> {
     Ack { seq: u32, errno: i32 },
-    Done,
+    Done { seq: u32 },
     Data { seq: u32, cmd: u16, attrs: &'a [u8] },
 }
 
@@ -177,7 +230,7 @@ pub fn parse(buf: &[u8]) -> Result<Vec<Reply<'_>>, &'static str> {
                 let errno = i32::from_ne_bytes([body[0], body[1], body[2], body[3]]);
                 out.push(Reply::Ack { seq, errno });
             }
-            NLMSG_DONE => out.push(Reply::Done),
+            NLMSG_DONE => out.push(Reply::Done { seq }),
             t if t >> 8 == NFNL_SUBSYS_IPSET => {
                 if body.len() < NFGEN_HDRLEN {
                     return Err("short nfgenmsg");
@@ -254,6 +307,20 @@ mod tests {
         assert_eq!(u16::from_ne_bytes([m[4], m[5]]), (6 << 8) | 11);
         assert_eq!(&m[20..25], &[5, 0, 1, 0, 7]);
         assert_eq!(&m[m.len() - 4..], &[192, 0, 2, 1]);
+    }
+
+    #[test]
+    fn add_msg_layout() {
+        let m = msg_add(3, 7, b"ban", &Addr::V4([192, 0, 2, 1]), None, 3600);
+        assert_eq!(
+            u16::from_ne_bytes([m[6], m[7]]),
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL
+        );
+        // timeout is the last attribute: be32 with NLA_F_NET_BYTEORDER
+        assert_eq!(&m[m.len() - 8..m.len() - 4], &[8, 0, 6, 0x40]);
+        assert_eq!(&m[m.len() - 4..], &3600u32.to_be_bytes());
+        let n = msg_add(3, 7, b"ban", &Addr::V4([192, 0, 2, 1]), Some(24), 60);
+        assert_eq!(n.len(), m.len() + 8);
     }
 
     #[test]
