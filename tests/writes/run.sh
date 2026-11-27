@@ -5,22 +5,23 @@ set -u
 . /src/tests/lib.sh
 
 IDX=$RUN/www/index.html
-WRITABLE="sundew_writable_sets sw_trap sw_trap6 sw_ban sw_net;"
+WRITABLE="sundew_writable_sets sw_trap sw_trap6 sw_ban sw_ban6 sw_net;"
 
 LOCS="location = /wp-login.php { ipset_autoadd sw_trap timeout=120; } \
 location = /trap403 { ipset_autoadd sw_trap status=403; } \
 location = /trap6 { ipset_autoadd sw_trap6; } \
+location = /both { ipset_autoadd sw_trap sw_trap6; } \
 location = /trapif { ipset_autoadd sw_trap if=\$arg_go; } \
 location = /dry { ipset_dryrun on; ipset_autoadd sw_trap; alias $IDX; } \
 location = /short { ipset_autoadd sw_trap timeout=2; } \
 location = /net { ipset_autoadd sw_net timeout=60 prefix4=24; } \
-location = /api { ipset_ratelimit rate=5 window=10s autoban=sw_ban ban_time=600; alias $IDX; } \
+location = /api { ipset_ratelimit rate=5 window=10s autoban=sw_ban,sw_ban6 ban_time=600; alias $IDX; } \
 location = /rl6 { ipset_ratelimit rate=3 window=10s key6=64; alias $IDX; } \
 location = /rl2 { ipset_ratelimit rate=2 window=2s; alias $IDX; }"
 
 restart() {   # extra main, extra http
     stop_all
-    MAIN="$WRITABLE ${1:-}" HTTP="${2:-}" LOC="$LOCS" conf "ipset_denylist sw_bad4 sw_trap sw_trap6 sw_ban;"
+    MAIN="$WRITABLE ${1:-}" HTTP="${2:-}" LOC="$LOCS" conf "ipset_denylist sw_bad4 sw_trap sw_trap6 sw_ban sw_ban6;"
     start
 }
 
@@ -33,6 +34,7 @@ setup_sets
 ipset create sw_trap hash:ip timeout 300
 ipset create sw_trap6 hash:ip family inet6 timeout 300
 ipset create sw_ban hash:ip timeout 300
+ipset create sw_ban6 hash:ip family inet6 timeout 300
 ipset create sw_net hash:net timeout 300
 ipset create sw_allow4 hash:ip
 ipset add sw_allow4 192.0.2.50
@@ -51,6 +53,15 @@ check "IPv6, set's default timeout" wait_for "[ \$(get 2001:db8::10 /trap6) = 40
 t=$(timeout_of sw_trap6 2001:db8::10)
 check "default timeout used ($t s)" [ -n "$t" ] && [ "$t" -gt 250 ]
 check "logged" grep -aq 'adding 192.0.2.10 to set "sw_trap" for 120s' $RUN/error.log
+
+echo "== address families"
+check "IPv6 client, IPv4-only trap: still 404" [ "$(get 2001:db8::20 /wp-login.php)" = 404 ]
+check "not added anywhere" not in_set sw_trap6 2001:db8::20
+check "logged" grep -aq 'no ipset_autoadd set for the address family of 2001:db8::20' $RUN/error.log
+check "its worker still talks to the helper" bash -c "$(declare -f alive is code); FRESH=500; for i in 1 2 3 4; do alive || exit 1; done"
+get 192.0.2.13 /both >/dev/null; get 2001:db8::13 /both >/dev/null
+check "one trap, two sets: IPv4 to sw_trap" wait_for "in_set sw_trap 192.0.2.13"
+check "one trap, two sets: IPv6 to sw_trap6" wait_for "in_set sw_trap6 2001:db8::13"
 check "stats: trapped and adds" [ "$(stat trapped)" -ge 3 ] && [ "$(stat adds)" -ge 3 ]
 
 echo "== a short ban does not outlive the kernel's timeout in the cache"
@@ -103,6 +114,8 @@ check "\$ipset_result = ratelimited" bash -c "for i in 1 2; do curl -s -o /dev/n
 for i in 1 2 3 4 5 6 7; do get 192.0.2.32 /api -H 'Sec-Fetch-Site: cross-site' >/dev/null; done
 sleep 0.3
 check "cross-site: 429 but no ban" not in_set sw_ban 192.0.2.32
+for i in 1 2 3 4 5 6; do get 2001:db8:9::1 /api >/dev/null; done
+check "autoban=, IPv6 client to the IPv6 set" wait_for "in_set sw_ban6 2001:db8:9::1"
 codes=$(for a in 2001:db8:1::1 2001:db8:1::2 2001:db8:1::3 2001:db8:1::4; do get $a /rl6; echo; done | tr '\n' ' ')
 check "IPv6 /64 shares one counter ($codes)" [ "$codes" = "200 200 200 429 " ]
 codes=$(for i in 1 2 3; do get 192.0.2.33 /rl2; echo; done | tr '\n' ' ')
