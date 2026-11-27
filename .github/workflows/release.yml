@@ -14,101 +14,44 @@ jobs:
   ci:
     uses: ./.github/workflows/ci.yml
 
-  artifacts:
-    needs: ci
-    runs-on: ${{ matrix.arch.runner }}
-    strategy:
-      fail-fast: true
-      matrix:
-        arch:
-          - { name: amd64, runner: ubuntu-latest }
-          - { name: arm64, runner: ubuntu-24.04-arm }
-        target:
-          - { name: nginx.org-1.30.8, base: "nginx:1.30.8", nginx: "1.30.8" }
-          - { name: nginx.org-1.30.8-alpine, base: "nginx:1.30.8-alpine", nginx: "1.30.8" }
-          - { name: nginx.org-1.31.10, base: "nginx:1.31.10", nginx: "1.31.10" }
-          - { name: nginx.org-1.31.10-alpine, base: "nginx:1.31.10-alpine", nginx: "1.31.10" }
-          - { name: debian13, base: "debian:trixie", nginx: "1.26.3", distro: "1" }
-          - { name: ubuntu24.04, base: "ubuntu:24.04", nginx: "1.24.0", distro: "1" }
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Build
-        run: >
-          make artifacts BASE=${{ matrix.target.base }} NGINX_VERSION=${{ matrix.target.nginx }}
-          DISTRO_NGINX=${{ matrix.target.distro }}
-      - name: Package
-        run: |
-          name="sundew-${GITHUB_REF_NAME#v}-${{ matrix.target.name }}-${{ matrix.arch.name }}"
-          dir="dist/$(echo '${{ matrix.target.base }}' | tr ':/' '--')"
-          mkdir -p "pkg/$name"
-          cp "$dir/ngx_http_sundew_module.so" "$dir/sundew-helper" LICENSE "pkg/$name/"
-          tar -C pkg -czf "$name.tar.gz" "$name"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ${{ matrix.target.name }}-${{ matrix.arch.name }}
-          path: "*.tar.gz"
-          if-no-files-found: error
-
-  images:
-    needs: ci
-    runs-on: ${{ matrix.arch.runner }}
-    permissions:
-      contents: read
-      packages: write
-    strategy:
-      fail-fast: true
-      matrix:
-        arch:
-          - { name: amd64, runner: ubuntu-latest }
-          - { name: arm64, runner: ubuntu-24.04-arm }
-        target:
-          - { tag: "nginx1.30.8", base: "nginx:1.30.8", nginx: "1.30.8" }
-          - { tag: "nginx1.30.8-alpine", base: "nginx:1.30.8-alpine", nginx: "1.30.8" }
-          - { tag: "nginx1.31.10", base: "nginx:1.31.10", nginx: "1.31.10" }
-          - { tag: "nginx1.31.10-alpine", base: "nginx:1.31.10-alpine", nginx: "1.31.10" }
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Load the ip_set kernel modules
-        run: ./.github/load-ipset.sh
-      - name: Build and test
-        run: >
-          make test-image BASE=${{ matrix.target.base }} NGINX_VERSION=${{ matrix.target.nginx }}
-          RELEASE_IMAGE="$IMAGE:${GITHUB_REF_NAME#v}-${{ matrix.target.tag }}-${{ matrix.arch.name }}"
-      - name: Push
-        env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "$TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker push "$IMAGE:${GITHUB_REF_NAME#v}-${{ matrix.target.tag }}-${{ matrix.arch.name }}"
-
-  manifests:
-    needs: images
+  plan:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      targets: ${{ steps.plan.outputs.targets }}
+      images: ${{ steps.plan.outputs.images }}
+      latest: ${{ steps.plan.outputs.latest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: plan
+        run: |
+          {
+            echo "version=${GITHUB_REF_NAME#v}"
+            echo "targets=$(python3 .github/scripts/targets.py matrix release)"
+            echo "images=$(python3 .github/scripts/targets.py matrix images)"
+            echo "latest=$(python3 .github/scripts/targets.py latest-image)"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [ci, plan]
     permissions:
       contents: read
       packages: write
-    steps:
-      - name: Multi-arch tags
-        env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "$TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          v=${GITHUB_REF_NAME#v}
-          for t in nginx1.30.8 nginx1.30.8-alpine nginx1.31.10 nginx1.31.10-alpine; do
-              docker buildx imagetools create -t "$IMAGE:$v-$t" "$IMAGE:$v-$t-amd64" "$IMAGE:$v-$t-arm64"
-          done
-          docker buildx imagetools create -t "$IMAGE:$v" "$IMAGE:$v-nginx1.30.8"
-          case "$v" in *-*) ;; *) docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$v-nginx1.30.8" ;; esac
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ github.ref_name }}
+      version: ${{ needs.plan.outputs.version }}
+      targets: ${{ needs.plan.outputs.targets }}
+      images: ${{ needs.plan.outputs.images }}
 
-  release:
-    needs: [artifacts, manifests]
+  publish:
+    needs: [plan, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: write
       id-token: write
       attestations: write
     steps:
@@ -124,10 +67,11 @@ jobs:
         with:
           subject-path: out/*.tar.gz
       - name: Release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
         run: |
-          v=${GITHUB_REF_NAME#v}
-          awk -v v="$v" '$0 ~ "^## \\[" v "\\]" { on = 1; next } /^## \[/ || /^\[[^]]+\]: / { on = 0 } on' CHANGELOG.md > notes.md
-          [ -s notes.md ] || { echo "CHANGELOG.md has no section for $v" >&2; exit 1; }
+          awk -v v="$VERSION" '$0 ~ "^## \\[" v "\\]" { on = 1; next } /^## \[/ || /^\[[^]]+\]: / { on = 0 } on' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "CHANGELOG.md has no section for $VERSION" >&2; exit 1; }
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -135,3 +79,13 @@ jobs:
           pre=""; case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
           gh release create "$GITHUB_REF_NAME" --verify-tag $pre --title "$GITHUB_REF_NAME" \
               --notes-file notes.md out/*.tar.gz out/SHA256SUMS
+      - name: Version and latest image tags
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          LATEST: ${{ needs.plan.outputs.latest }}
+        run: |
+          echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker buildx imagetools create -t "$IMAGE:$VERSION" "$IMAGE:$VERSION-$LATEST"
+          case "$VERSION" in *-*) ;; *) docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$VERSION-$LATEST" ;; esac

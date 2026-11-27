@@ -1,0 +1,127 @@
+name: build
+
+# Builds release tarballs and images for a list of targets from one ref.
+# Called by release.yml (every target) and targets.yml (targets a release lacks).
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: tag to build from
+        required: true
+        type: string
+      version:
+        description: Sundew version, without the v
+        required: true
+        type: string
+      targets:
+        description: JSON list from targets.py matrix release
+        required: true
+        type: string
+      images:
+        description: JSON list from targets.py matrix images
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/sundew
+
+jobs:
+  artifacts:
+    if: inputs.targets != '[]'
+    runs-on: ${{ matrix.arch.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        arch:
+          - { name: amd64, runner: ubuntu-latest }
+          - { name: arm64, runner: ubuntu-24.04-arm }
+        target: ${{ fromJSON(inputs.targets) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Build
+        env:
+          BASE: ${{ matrix.target.base }}
+          NGINX: ${{ matrix.target.nginx }}
+          SHA: ${{ matrix.target.sha256 }}
+          DISTRO: ${{ matrix.target.distro }}
+        run: make artifacts BASE="$BASE" NGINX_VERSION="$NGINX" NGINX_SHA256="$SHA" DISTRO_NGINX="$DISTRO"
+      - name: Package
+        env:
+          BASE: ${{ matrix.target.base }}
+          NAME: ${{ matrix.target.name }}
+          ARCH: ${{ matrix.arch.name }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          name="sundew-$VERSION-$NAME-$ARCH"
+          dir="dist/$(echo "$BASE" | tr ':/' '--')"
+          mkdir -p "pkg/$name"
+          cp "$dir/ngx_http_sundew_module.so" "$dir/sundew-helper" LICENSE "pkg/$name/"
+          tar -C pkg -czf "$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.target.name }}-${{ matrix.arch.name }}
+          path: "*.tar.gz"
+          if-no-files-found: error
+
+  images:
+    if: inputs.images != '[]'
+    runs-on: ${{ matrix.arch.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        arch:
+          - { name: amd64, runner: ubuntu-latest }
+          - { name: arm64, runner: ubuntu-24.04-arm }
+        target: ${{ fromJSON(inputs.images) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Load the ip_set kernel modules
+        run: ./.github/load-ipset.sh
+      - name: Build and test
+        env:
+          BASE: ${{ matrix.target.base }}
+          NGINX: ${{ matrix.target.nginx }}
+          SHA: ${{ matrix.target.sha256 }}
+          TAG: ${{ inputs.version }}-${{ matrix.target.image }}-${{ matrix.arch.name }}
+        run: make test-image BASE="$BASE" NGINX_VERSION="$NGINX" NGINX_SHA256="$SHA" RELEASE_IMAGE="$IMAGE:$TAG"
+      - name: Push
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          TAG: ${{ inputs.version }}-${{ matrix.target.image }}-${{ matrix.arch.name }}
+        run: |
+          echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker push "$IMAGE:$TAG"
+
+  manifests:
+    if: inputs.images != '[]'
+    needs: images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Multi-arch tags
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          VERSION: ${{ inputs.version }}
+          IMAGES: ${{ inputs.images }}
+        run: |
+          echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          for t in $(echo "$IMAGES" | python3 -c 'import json,sys; print(" ".join(x["image"] for x in json.load(sys.stdin)))'); do
+              docker buildx imagetools create -t "$IMAGE:$VERSION-$t" "$IMAGE:$VERSION-$t-amd64" "$IMAGE:$VERSION-$t-arm64"
+          done

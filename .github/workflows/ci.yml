@@ -15,6 +15,22 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      test: ${{ steps.plan.outputs.test }}
+      images: ${{ steps.plan.outputs.images }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: plan
+        run: |
+          {
+            echo "test=$(python3 .github/scripts/targets.py matrix ci)"
+            echo "images=$(python3 .github/scripts/targets.py matrix image-test)"
+          } >> "$GITHUB_OUTPUT"
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -26,36 +42,42 @@ jobs:
       - run: make docs-build
 
   test:
+    needs: plan
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        nginx: ["1.24.0", "1.30.8", "1.31.10"]
-        san: [""]
-        include:
-          - nginx: "1.30.8"
-            san: "1"
-    name: test (nginx ${{ matrix.nginx }}${{ matrix.san && ', sanitizers' || '' }})
+        cell: ${{ fromJSON(needs.plan.outputs.test) }}
+    name: test (nginx ${{ matrix.cell.nginx }}${{ matrix.cell.san && ', sanitizers' || '' }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Load the ip_set kernel modules
         run: ./.github/load-ipset.sh
-      - run: make test-all NGINX_VERSION=${{ matrix.nginx }} SAN=${{ matrix.san }}
-      - run: make test-pid1 NGINX_VERSION=${{ matrix.nginx }}
-        if: matrix.san == ''
+      - env:
+          NGINX: ${{ matrix.cell.nginx }}
+          SAN: ${{ matrix.cell.san }}
+        run: make test-all NGINX_VERSION="$NGINX" SAN="$SAN"
+      - if: matrix.cell.san == ''
+        env:
+          NGINX: ${{ matrix.cell.nginx }}
+        run: make test-pid1 NGINX_VERSION="$NGINX"
 
   image:
+    needs: plan
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        base: ["nginx:1.30.8", "nginx:1.30.8-alpine"]
+        target: ${{ fromJSON(needs.plan.outputs.images) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Load the ip_set kernel modules
         run: ./.github/load-ipset.sh
-      - run: make test-image BASE=${{ matrix.base }} RELEASE_IMAGE=sundew-test
+      - env:
+          BASE: ${{ matrix.target.base }}
+          NGINX: ${{ matrix.target.nginx }}
+        run: make test-image BASE="$BASE" NGINX_VERSION="$NGINX" RELEASE_IMAGE=sundew-test

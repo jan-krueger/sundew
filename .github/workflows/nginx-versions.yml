@@ -1,0 +1,58 @@
+name: nginx-versions
+
+# Daily: follow new nginx.org releases and the distributions' nginx packages.
+# New versions are tested here, then proposed as a pull request; merging it
+# lets targets.yml add matching downloads to the latest release.
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nginx-versions
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: update
+        run: python3 .github/scripts/targets.py update
+      - name: Load the ip_set kernel modules
+        if: steps.update.outputs.new_versions != ''
+        run: ./.github/load-ipset.sh
+      - name: Test the new versions
+        if: steps.update.outputs.new_versions != ''
+        env:
+          NEW: ${{ steps.update.outputs.new_versions }}
+        run: |
+          for v in $NEW; do
+              make test-all NGINX_VERSION="$v"
+          done
+      - name: Propose
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUMMARY: ${{ steps.update.outputs.summary }}
+        run: |
+          branch=bot/nginx-versions
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$branch"
+          git add release/targets.json versions.mk
+          git commit -q -m "build: follow new nginx releases"
+          git push -f origin "$branch"
+          body=$(printf '%s\n\nThe new versions passed the full test suite in this run.\n' "$SUMMARY")
+          if gh pr view "$branch" >/dev/null 2>&1; then
+              gh pr edit "$branch" --body "$body"
+          else
+              gh pr create --head "$branch" --title "build: follow new nginx releases" --body "$body"
+          fi
