@@ -7,11 +7,13 @@ set -u
 IDX=$RUN/www/index.html
 S=nft:inet/sw
 
-restart() {   # sets, extra main, locations
+restart() {   # sets, extra main, locations, http (default: no cache)
     stop_all
-    MAIN="${2:-}" HTTP="ipset_cache_ttl 0;" LOC="${3:-}" conf "$1"
+    MAIN="${2:-}" HTTP="${4-ipset_cache_ttl 0;}" LOC="${3:-}" conf "$1"
     start
 }
+# within 2 s: far below the 60 s cache
+soon() { local i; for i in $(seq 1 20); do "$@" && return 0; sleep 0.1; done; return 1; }
 hdr() { curl -s -D - -o /dev/null -H "X-Forwarded-For: $1" "http://127.0.0.1:8080${2:-/}" | tr -d '\r' | awk -F': ' 'tolower($1) == "x-sundew" { print $2 }'; }
 get() { curl -s -o /dev/null -w '%{http_code}' -H "X-Forwarded-For: $1" "http://127.0.0.1:8080$2"; }
 elem() { nft list set inet sw "$1" | tr -d '\n' | grep -o "$2 [^,}]*"; }
@@ -58,6 +60,33 @@ check "added element denied at once" is 192.0.2.30 403
 nft delete element inet sw bad4 '{ 192.0.2.30 }'
 check "deleted element allowed again" is 192.0.2.30 200
 
+echo "== changes reach the cache at once (cache 60s)"
+restart "ipset_denylist $S/bad4 $S/nets sw_bad4;" "" "" ""
+check "cached as allowed" is 192.0.2.40 200
+nft add element inet sw bad4 '{ 192.0.2.40 }'
+check "added element denied at once" soon is 192.0.2.40 403
+nft delete element inet sw bad4 '{ 192.0.2.40 }'
+check "deleted element allowed at once" soon is 192.0.2.40 200
+check "interval set: cached as allowed" is 198.51.101.5 200
+nft add element inet sw nets '{ 198.51.101.0/24 }'
+check "interval set: added range denied at once" soon is 198.51.101.5 403
+nft delete element inet sw nets '{ 198.51.101.0/24 }'
+check "interval set: removed range allowed at once" soon is 198.51.101.5 200
+nft add element inet sw bad4 '{ 192.0.2.41 }'
+check "denied" is 192.0.2.41 403
+nft flush set inet sw bad4
+check "flushed set: allowed at once" soon is 192.0.2.41 200
+for i in $(seq 1 20); do is 192.0.2.$((100 + i)) 200; done
+nft add element inet sw bad4 "{ $(seq -s, -f '203.0.113.%g' 1 200), $(seq -s, -f '192.0.2.%g' 101 120) }"
+all_denied() { local i; for i in $(seq 101 120); do is 192.0.2.$i 403 || return 1; done; }
+check "200 elements at once: all denied" soon all_denied
+check "ipset: cached as allowed" is 192.0.2.42 200
+ipset add sw_bad4 192.0.2.42
+nft add element inet sw bad4 '{ 192.0.2.3 }'
+check "an nft change leaves ipset answers cached" is 192.0.2.42 200
+ipset del sw_bad4 192.0.2.42
+check "changes logged at debug level" grep -aq 'sundew set "nft:inet/sw/bad4" changed' $RUN/error.log
+
 echo "== ipset and nftables together"
 restart "ipset_denylist sw_bad4 $S/bad4; ipset_allowlist $S/allow;"
 check "ipset member" is 192.0.2.1 403
@@ -70,8 +99,7 @@ nft add set inet sw tmp '{ type ipv4_addr; }'
 restart "ipset_denylist $S/bad4 $S/tmp;"
 check "before: allowed" is 192.0.2.60 200
 nft delete set inet sw tmp
-sleep 10.5
-check "after: lookups fail closed" is 192.0.2.61 403
+check "after: lookups fail closed at once" soon is 192.0.2.61 403
 check "logged" wait_for "grep -aq 'set \"$S/tmp\" no longer exists' $RUN/error.log"
 nft add set inet sw tmp '{ type ipv4_addr; }'
 check "recreated: lookups work again" wait_for "is 192.0.2.62 200"
