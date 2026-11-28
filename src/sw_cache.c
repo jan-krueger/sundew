@@ -130,12 +130,12 @@ uint64_t
 sw_cache_set_ident(ngx_shm_zone_t *zone, ngx_str_t *name, ngx_uint_t family,
     u_char *type, ngx_uint_t revision)
 {
-    u_char       buf[96], *p;
+    u_char       buf[SW_SETREF_LEN + 40], *p;
     sw_cache_t  *c;
 
     c = zone->data;
 
-    p = ngx_cpymem(buf, name->data, ngx_min(name->len, 31));
+    p = ngx_cpymem(buf, name->data, ngx_min(name->len, SW_SETREF_LEN - 1));
     *p++ = '\0';
     *p++ = (u_char) family;
     p = ngx_cpystrn(p, type, 32) + 1;
