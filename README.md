@@ -4,8 +4,8 @@ Kernel ipset and nftables access control for nginx, without giving your web
 server root.
 
 Sundew blocks or allows clients by checking their address against Linux
-ipsets or nftables sets. A set changed by fail2ban, CrowdSec or an admin applies to the next
-request, with no reload. It works behind CDNs and load balancers through
+ipsets or nftables sets. A set changed by fail2ban, CrowdSec or an admin
+applies to the next request, with no reload. It works behind CDNs and load balancers through
 nginx's `realip` module, for IPv4 and IPv6, over HTTP/1.1, HTTP/2 and HTTP/3.
 
 ```bash
@@ -16,17 +16,17 @@ docker run -d --cap-add NET_ADMIN --network host \
 
 Prebuilt modules exist for the nginx.org packages, Debian 13 and Ubuntu 24.04;
 any other nginx 1.24+ builds from source. See
-[Get started](docs/get-started.md).
+[Get started](https://jan-krueger.github.io/sundew/get-started/).
 
 nginx workers keep no privileges. A small helper that nginx starts and
 supervises is the only process with `CAP_NET_ADMIN`; it runs under seccomp and
 Landlock and answers only for the sets your configuration names. See the
-[security model](docs/concepts/security.md).
+[security model](https://jan-krueger.github.io/sundew/concepts/security/).
 
 Configurations written for the commercial `ipset_*` module work as they are,
 including `ipset_blacklist` and `ipset_whitelist`; Sundew's own names are
-`ipset_denylist` and `ipset_allowlist`. See
-[migration guide](docs/guides/migrate.md).
+`ipset_denylist` and `ipset_allowlist`. See the
+[migration guide](https://jan-krueger.github.io/sundew/guides/migrate/).
 
 **Status:** 0.2. Denylists and allowlists, honeypots (`ipset_autoadd`) and rate
 limiting with bans (`ipset_ratelimit`).
@@ -37,12 +37,12 @@ The documentation is published at <https://jan-krueger.github.io/sundew/>.
 
 | | |
 | --- | --- |
-| [Get started](docs/get-started.md) | Install with Docker, a prebuilt module or from source; block your first address |
-| [Guides](docs/guides/index.md) | fail2ban, CDNs, admin areas, dry runs, Docker and Kubernetes, Prometheus, migration |
-| [Directives](docs/reference/directives.md) | Every directive, with syntax, default and context |
-| [Log messages](docs/reference/messages.md) | What each message means and how to fix it |
-| [Security model](docs/concepts/security.md) | What each process may do |
-| [How a request is checked](docs/concepts/request-flow.md) | The request path, the cache and what it costs |
+| [Get started](https://jan-krueger.github.io/sundew/get-started/) | Install with Docker, a prebuilt module or from source; block your first address |
+| [Guides](https://jan-krueger.github.io/sundew/guides/) | Honeypots, rate limits, fail2ban, nftables, CDNs, admin areas, dry runs, Docker and Kubernetes, Prometheus, migration |
+| [Directives](https://jan-krueger.github.io/sundew/reference/directives/) | Every directive, with syntax, default and context |
+| [Log messages](https://jan-krueger.github.io/sundew/reference/messages/) | What each message means and how to fix it |
+| [Security model](https://jan-krueger.github.io/sundew/concepts/security/) | What each process may do |
+| [How a request is checked](https://jan-krueger.github.io/sundew/concepts/request-flow/) | The request path, the cache and what it costs |
 
 ## License
 
