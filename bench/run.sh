@@ -73,6 +73,23 @@ end
 LUA
 docker cp "$CONF/random.lua" $NS:/tmp/random.lua
 
+cat > "$CONF/clients.lua" <<'LUA'
+-- 1,000 clients that repeat: cache hits, each well under the rate limit
+local threads = 0
+setup = function(thread)
+  threads = threads + 1
+  thread:set("seed", threads)
+end
+init = function()
+  math.randomseed(seed * 7919 + os.time())
+end
+request = function()
+  local i = math.random(0, 999)
+  return wrk.format(nil, nil, { ["X-Forwarded-For"] = string.format("10.99.%d.%d", math.floor(i / 256), i % 256 + 1) })
+end
+LUA
+docker cp "$CONF/clients.lua" $NS:/tmp/clients.lua
+
 ticks() {   # comm -> summed utime+stime of its processes in the nginx container
     docker top $C -eo pid,comm | awk -v c="$1" '$2 == c { print $1 }' |
         while read -r p; do awk '{ print $14 + $15 }' /proc/"$p"/stat 2>/dev/null; done | awk '{ s += $1 } END { print s + 0 }'
@@ -81,6 +98,7 @@ ticks() {   # comm -> summed utime+stime of its processes in the nginx container
 run() {   # path, address or "random" -> "req/s mean-latency-ms"
     local args=(-H "X-Forwarded-For: $2") e0 w0
     [ "$2" = random ] && args=(-s /tmp/random.lua)
+    [ "$2" = clients ] && args=(-s /tmp/clients.lua)
     [ -n "${PROFILE:-}" ] && { e0=$(ticks sundew-engine); w0=$(ticks nginx); }
     docker exec $NS wrk -t 4 -c 64 -d "${DURATION}s" --latency "${args[@]}" "http://127.0.0.1$1" 2>/dev/null |
         awk '/^Requests\/sec/ { rps = $2 }
@@ -102,6 +120,9 @@ CASES=(
     "A new address on every request (all misses)|/hit|random"
     "All misses, set of 1,000,000 entries|/big|random"
     "All misses plus ipset_ratelimit|/rl|random"
+    "No check, 1,000 clients (baseline for the next two)|/off|clients"
+    "Cache hits, 1,000 clients|/hit|clients"
+    "Cache hits plus ipset_ratelimit, 1,000 clients|/rl|clients"
 )
 
 # every round runs every case once, so drift (heat, turbo) spreads evenly
