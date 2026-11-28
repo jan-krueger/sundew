@@ -69,7 +69,11 @@ table inet sundew {
 
 - `prefix4=` and `prefix6=` need an ipset `hash:net` set; an nftables set
   Sundew adds to holds single addresses.
-- If an nftables set is deleted while nginx runs, Sundew notices within 10
-  seconds; until then the set reads as empty. An ipset is noticed at once.
+- Changes to nftables sets reach nginx at once; changes to ipsets once the
+  cached answer expires, after at most
+  [`ipset_cache_ttl`](../reference/directives.md#ipset_cache_ttl). See
+  [Caching](../concepts/caching.md#nftables).
+- Elements that expire by their own `timeout` are not announced: for those, a
+  ban that ran out still applies for at most `ipset_cache_ttl`.
 - A configuration that uses only nftables sets does not need the `ip_set`
   kernel module.

@@ -6,11 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Changes to nftables sets reach nginx at once: the helper listens to the
+  kernel's change notifications and drops the affected cached answers, for one
+  address or for the whole set. ipset changes, which the kernel does not
+  announce, still reach nginx within `ipset_cache_ttl`.
+
 ### Changed
 - Lookups the cache cannot answer go to the kernel in batches, and workers
   and the helper exchange questions and answers in batches. Under a flood of
   new client addresses, nginx serves noticeably more requests, and the
   helper has more room before it becomes the limit.
+- Module and helper speak protocol 4: install both from the same release.
+
+### Fixed
+- Cached answers of two nftables sets whose names share their first 31
+  characters were mixed up.
 
 ## [0.3.0] - 2026-11-28
 

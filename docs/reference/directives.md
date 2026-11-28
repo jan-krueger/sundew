@@ -133,8 +133,11 @@ sets [`$ipset_result`](variables.md) to `dryrun`.
 </table>
 
 How long an answer from the kernel is reused, for addresses in a set and for
-addresses not in it. A change to a set reaches an address that was looked up
-within this time once it expires. `0` asks the kernel on every request.
+addresses not in it. A change to an ipset reaches an address that was looked
+up within this time once it expires. Changes to nftables sets reach nginx at
+once; for those this is the limit for elements that expire by their own
+timeout, which the kernel does not announce. `0` asks the kernel on every
+request.
 
 ### sundew_lookup_timeout
 

@@ -18,7 +18,7 @@ small helper.
 | nginx master | root | as started | Start workers and the helper |
 | nginx worker | your `user` | none, checked at start | Ask the helper about an address and a list of set numbers, or to apply an add rule to an address |
 | sundew-keeper | `sundew` | `CAP_NET_ADMIN` | Restart the engine; reads nothing from workers |
-| sundew-engine | `sundew` | `CAP_NET_ADMIN` | Look up the configured sets, and add to the sets in `sundew_writable_sets` through the configured rules |
+| sundew-engine | `sundew` | `CAP_NET_ADMIN` | Look up the configured sets, add to the sets in `sundew_writable_sets` through the configured rules, and hear about nftables changes |
 
 ## If an attacker takes over a worker
 

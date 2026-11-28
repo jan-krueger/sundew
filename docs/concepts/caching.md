@@ -23,7 +23,9 @@ another type starts fresh.
 
 ## How fresh
 
-The kernel does not announce changes to sets, so a change made by fail2ban or
+### ipset
+
+The kernel does not announce changes to ipsets, so a change made by fail2ban or
 an admin reaches nginx:
 
 --8<-- "timeline.html"
@@ -34,6 +36,25 @@ an admin reaches nginx:
   `ipset_cache_ttl` later.
 
 `ipset_cache_ttl 0` asks the kernel on every request.
+
+### nftables
+
+The kernel announces every change to an nftables set, and the helper listens.
+A change reaches nginx at once, whoever makes it:
+
+| Change | Dropped from the cache |
+| --- | --- |
+| An address added to or deleted from a set | That address |
+| A range added to or deleted from a set with `flags interval` | Every answer for the set |
+| A set flushed, deleted or created; its table deleted | Every answer for the set |
+
+An answer the kernel gave just before a change, and that arrives just after
+it, is used for its request but not cached. If announcements are lost, for
+example under a burst of thousands of changes, every nftables set's answers
+are dropped.
+
+The kernel does not announce elements that expire by their own timeout: a
+ban that runs out in the kernel still applies for at most `ipset_cache_ttl`.
 
 ## How big
 
