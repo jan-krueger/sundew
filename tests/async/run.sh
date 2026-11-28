@@ -147,16 +147,18 @@ check "all pending requests completed across reload" [ "$(cat /tmp/codes.* | gre
 check "old helper drained" wait_for '[ "$(count keepers)" = 1 ]'
 clean reload
 
-echo "== engine killed with pending lookups (delay 100ms, timeout 1s)"
-restart "sundew_debug_delay 100ms;" "sundew_lookup_timeout 1s;"
+echo "== engine killed with pending lookups (delay 300ms, timeout 1s)"
+restart "sundew_debug_delay 300ms;" "sundew_lookup_timeout 1s;"
 rm -f /tmp/codes.*
 for ip in $(ips 10 5); do
     (curl -s -o /dev/null -w '%{http_code}' -H "X-Forwarded-For: $ip" $URL1 > /tmp/codes.$ip) &
 done
-# all ten lookups are with the engine (delayed) before it dies
+# all ten lookups sent; no new engine may answer them before they time out
 wait_for '[ "$(curl -s http://127.0.0.1:8080/stats | python3 -I -c "import json,sys; print(json.load(sys.stdin)[\"counters\"][\"lookups\"])")" -ge 10 ]'
+kill -STOP "$(keepers)"
 kill -9 "$(engines)"
 wait
+kill -CONT "$(keepers)"
 check "lost replies fail closed (403) ($(cat /tmp/codes.* | fold -w3 | sort | uniq -c | tr -s " " | tr "\n" ","))" [ "$(cat /tmp/codes.* | grep -o 403 | wc -l)" = 10 ]
 check "engine restarted" wait_for '[ "$(count engines)" = 1 ]'
 check "serving after restart" wait_for '[ "$(h1 192.0.2.2)" = 200 ]'
