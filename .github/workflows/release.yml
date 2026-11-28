@@ -3,16 +3,25 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # targets.yml: tags it pushes trigger no workflows
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/sundew
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   ci:
     uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ inputs.tag || github.ref_name }}
 
   plan:
     runs-on: ubuntu-latest
@@ -24,11 +33,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.TAG }}
           persist-credentials: false
       - id: plan
         run: |
           {
-            echo "version=${GITHUB_REF_NAME#v}"
+            echo "version=${TAG#v}"
             echo "targets=$(python3 .github/scripts/targets.py matrix release)"
             echo "images=$(python3 .github/scripts/targets.py matrix images)"
             echo "latest=$(python3 .github/scripts/targets.py latest-image)"
@@ -41,7 +51,7 @@ jobs:
       packages: write
     uses: ./.github/workflows/build.yml
     with:
-      ref: ${{ github.ref_name }}
+      ref: ${{ inputs.tag || github.ref_name }}
       version: ${{ needs.plan.outputs.version }}
       targets: ${{ needs.plan.outputs.targets }}
       images: ${{ needs.plan.outputs.images }}
@@ -57,6 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.TAG }}
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -76,8 +87,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          pre=""; case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" --verify-tag $pre --title "$GITHUB_REF_NAME" \
+          pre=""; case "$TAG" in *-*) pre="--prerelease" ;; esac
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag $pre --title "$TAG" \
               --notes-file notes.md out/*.tar.gz out/SHA256SUMS
       - name: Version and latest image tags
         env:

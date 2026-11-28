@@ -5,8 +5,13 @@
   targets.py latest-image                          image tag for :latest
   targets.py update                                follow nginx.org and the distributions
   targets.py missing <tag>                         targets without assets in a release
+  targets.py summary < targets                     one line naming targets (JSON list)
+  targets.py next-patch <tag>                      next free patch tag after <tag>
+  targets.py bump <version> <base> <summary>       version files and CHANGELOG entry
+  targets.py changelog <version> <base> <summary>  CHANGELOG entry only
 """
 
+import datetime
 import hashlib
 import json
 import os
@@ -194,9 +199,6 @@ def api(path):
 
 def missing(tag):
     release = api(f"releases/tags/{tag}")
-    if release.get("immutable"):
-        print(f"::notice::{tag} is immutable; assets cannot be added", file=sys.stderr)
-        return []
     try:
         api(f"contents/release/targets.json?ref={tag}")
     except urllib.error.HTTPError as e:
@@ -208,6 +210,65 @@ def missing(tag):
     version = tag.lstrip("v")
     return [t for t in matrix("release")
             if any(f"sundew-{version}-{t['name']}-{arch}.tar.gz" not in assets for arch in ("amd64", "arm64"))]
+
+
+TRACK_NAMES = {"stable": "nginx.org stable", "mainline": "nginx.org mainline",
+               "debian13": "Debian 13 nginx", "ubuntu24.04": "Ubuntu 24.04 nginx"}
+
+
+def summary(targets):
+    seen = []
+    for t in targets:
+        s = f"{TRACK_NAMES.get(t['track'], t['track'])} {t['nginx']}"
+        if s not in seen:
+            seen.append(s)
+    return ", ".join(seen)
+
+
+def next_patch(tag):
+    major, minor, patch = (int(x) for x in tag.lstrip("v").split("-")[0].split("."))
+    tags = subprocess.run(["git", "tag", "-l", f"v{major}.{minor}.*"],
+                          capture_output=True, text=True, check=True).stdout.split()
+    taken = [int(m.group(1)) for t in tags if (m := re.fullmatch(rf"v{major}\.{minor}\.(\d+)", t))]
+    return f"v{major}.{minor}.{max(taken + [patch]) + 1}"
+
+
+def changelog(version, base, text):
+    with open("CHANGELOG.md") as f:
+        lines = f.read().splitlines()
+    head = next(i for i, line in enumerate(lines) if re.match(r"## \[\d", line))
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    entry = [f"## [{version}] - {today}", "", "### Added",
+             f"- Prebuilt modules for {text}.", ""]
+    lines[head:head] = entry
+    for i, line in enumerate(lines):
+        m = re.match(r"\[Unreleased\]: (.*)/compare/v[^.]+\.[^.]+\.[^.]+\.\.\.HEAD$", line)
+        if m:
+            url = m.group(1)
+            lines[i] = f"[Unreleased]: {url}/compare/v{version}...HEAD"
+            lines.insert(i + 1, f"[{version}]: {url}/compare/v{base}...v{version}")
+            break
+    else:
+        raise SystemExit("CHANGELOG.md has no [Unreleased] link")
+    with open("CHANGELOG.md", "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def bump(version, base, text):
+    edits = [("src/ngx_sundew.h", rf'#define SUNDEW_VERSION  "{re.escape(base)}"',
+              f'#define SUNDEW_VERSION  "{version}"'),
+             ("helper/Cargo.toml", rf'(?m)^version = "{re.escape(base)}"$', f'version = "{version}"'),
+             ("helper/Cargo.lock", rf'name = "sundew-helper"\nversion = "{re.escape(base)}"',
+              f'name = "sundew-helper"\nversion = "{version}"')]
+    for path, pattern, new in edits:
+        with open(path) as f:
+            s = f.read()
+        s, n = re.subn(pattern, new, s, count=1)
+        if n != 1:
+            raise SystemExit(f"{path}: version {base} not found")
+        with open(path, "w") as f:
+            f.write(s)
+    changelog(version, base, text)
 
 
 def main():
@@ -222,6 +283,14 @@ def main():
         update()
     elif cmd == "missing":
         print(json.dumps(missing(sys.argv[2])))
+    elif cmd == "summary":
+        print(summary(json.load(sys.stdin)))
+    elif cmd == "next-patch":
+        print(next_patch(sys.argv[2]))
+    elif cmd == "bump":
+        bump(*sys.argv[2:5])
+    elif cmd == "changelog":
+        changelog(*sys.argv[2:5])
     else:
         raise SystemExit(__doc__)
 

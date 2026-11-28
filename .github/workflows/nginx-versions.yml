@@ -50,7 +50,7 @@ jobs:
           git add release/targets.json versions.mk
           git commit -q -m "build: follow new nginx releases"
           git push -f origin "$branch"
-          body=$(printf '%s\n\nThe new versions passed the full test suite in this run.\n' "$SUMMARY")
+          body=$(printf '%s\n\nThe new versions passed the full test suite in this run. Merging cuts a patch release of the latest release with these targets.\n' "$SUMMARY")
           if gh pr view "$branch" >/dev/null 2>&1; then
               gh pr edit "$branch" --body "$body"
           else
