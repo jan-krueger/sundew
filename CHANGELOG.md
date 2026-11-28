@@ -15,8 +15,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 - Module and helper speak protocol 3: install both from the same release.
-- A new nginx version arrives as a patch release, for example 0.2.1, instead
-  of being added to an existing release. Releases are immutable.
+- Builds for a new nginx version are added to the latest release once they
+  pass the tests; published files are never replaced. For 0.2.0, which cannot
+  take new files, they arrive as a patch release such as 0.2.1.
 
 ### Fixed
 - `ipset_ratelimit` let one request too many through when it arrived just
