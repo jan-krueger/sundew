@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- Lookups the cache cannot answer go to the kernel in batches, and workers
+  and the helper exchange questions and answers in batches. Under a flood of
+  new client addresses, nginx serves noticeably more requests, and the
+  helper has more room before it becomes the limit.
+
 ## [0.3.0] - 2026-11-28
 
 ### Added
