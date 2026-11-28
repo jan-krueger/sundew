@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Verdict cache: 7-way buckets, seqlock readers, writers under the slab
- * mutex.
+ * mutex. A set's entries are dropped together by bumping its epoch, which
+ * is part of every key.
  */
 
 #include <ngx_config.h>
@@ -19,6 +20,7 @@
 #define SW_WAYS             7
 #define SW_READ_TRIES       16
 #define SW_TICK_MS          100
+#define SW_EPOCHS           256
 
 
 typedef struct {
@@ -33,9 +35,13 @@ typedef struct {
 } sw_bucket_t;
 
 struct sw_cache_s {
-    uint64_t     key[2];
-    uint64_t     nbuckets;
-    sw_bucket_t *buckets;
+    uint64_t      key[2];
+    uint64_t      nbuckets;
+    sw_bucket_t  *buckets;
+    /* bumped under the mutex by every drop */
+    uint64_t      changes;
+    /* per set, by ident; sets sharing a slot only see extra misses */
+    uint64_t      epochs[SW_EPOCHS];
 };
 
 
@@ -145,6 +151,18 @@ sw_cache_set_ident(ngx_shm_zone_t *zone, ngx_str_t *name, ngx_uint_t family,
 }
 
 
+/* the key of a set's entries in its current epoch */
+static uint64_t
+sw_cache_epoch_ident(sw_cache_t *c, uint64_t ident)
+{
+    uint64_t  e;
+
+    e = __atomic_load_n(&c->epochs[ident % SW_EPOCHS], __ATOMIC_ACQUIRE);
+
+    return ident + e * 0x9e3779b97f4a7c15ULL;
+}
+
+
 static sw_bucket_t *
 sw_cache_bucket(sw_cache_t *c, uint64_t ident, const u_char *addr,
     uint8_t *tag)
@@ -186,6 +204,7 @@ sw_cache_get(ngx_shm_zone_t *zone, uint64_t ident, const u_char *addr,
     sw_bucket_t  *b;
 
     c = zone->data;
+    ident = sw_cache_epoch_ident(c, ident);
     b = sw_cache_bucket(c, ident, addr, &tag);
 
     for (tries = 0; tries < SW_READ_TRIES; tries++) {
@@ -241,28 +260,23 @@ sw_cache_get(ngx_shm_zone_t *zone, uint64_t ident, const u_char *addr,
 }
 
 
-void
-sw_cache_put(ngx_shm_zone_t *zone, uint64_t ident, const u_char *addr,
-    ngx_uint_t verdict, ngx_uint_t max_age)
+uint64_t
+sw_cache_changes(ngx_shm_zone_t *zone)
 {
-    uint8_t           tag;
-    uint32_t          s, now, oldest, age;
-    uint64_t          w[4];
-    ngx_uint_t        i, k, slot, empty, victim;
-    sw_cache_t       *c;
-    sw_bucket_t      *b;
-    ngx_slab_pool_t  *shpool;
+    sw_cache_t  *c;
 
     c = zone->data;
-    shpool = (ngx_slab_pool_t *) zone->shm.addr;
-    b = sw_cache_bucket(c, ident, addr, &tag);
-    now = sw_now_tick();
 
-    ngx_memcpy(w, addr, 16);
-    w[2] = ident;
-    w[3] = sw_meta(now, verdict, max_age);
+    return __atomic_load_n(&c->changes, __ATOMIC_ACQUIRE);
+}
 
-    ngx_shmtx_lock(&shpool->mutex);
+
+/* begin a write to b under the mutex; returns the seq to finish with */
+static uint32_t
+sw_bucket_begin(sw_bucket_t *b)
+{
+    uint32_t    s;
+    ngx_uint_t  i;
 
     s = b->seq;
 
@@ -277,6 +291,43 @@ sw_cache_put(ngx_shm_zone_t *zone, uint64_t ident, const u_char *addr,
 
     __atomic_store_n(&b->seq, s + 1, __ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_RELEASE);
+
+    return s + 2;
+}
+
+
+void
+sw_cache_put(ngx_shm_zone_t *zone, uint64_t ident, const u_char *addr,
+    ngx_uint_t verdict, ngx_uint_t max_age, uint64_t since)
+{
+    uint8_t           tag;
+    uint32_t          s, now, oldest, age;
+    uint64_t          w[4];
+    ngx_uint_t        i, k, slot, empty, victim;
+    sw_cache_t       *c;
+    sw_bucket_t      *b;
+    ngx_slab_pool_t  *shpool;
+
+    c = zone->data;
+    shpool = (ngx_slab_pool_t *) zone->shm.addr;
+    now = sw_now_tick();
+
+    ngx_shmtx_lock(&shpool->mutex);
+
+    if (since != SW_CACHE_ANY && c->changes != since) {
+        /* the answer may predate a change */
+        ngx_shmtx_unlock(&shpool->mutex);
+        return;
+    }
+
+    ident = sw_cache_epoch_ident(c, ident);
+    b = sw_cache_bucket(c, ident, addr, &tag);
+
+    ngx_memcpy(w, addr, 16);
+    w[2] = ident;
+    w[3] = sw_meta(now, verdict, max_age);
+
+    s = sw_bucket_begin(b);
 
     /* same key, else an empty way, else the oldest entry */
 
@@ -317,7 +368,48 @@ sw_cache_put(ngx_shm_zone_t *zone, uint64_t ident, const u_char *addr,
         __atomic_store_n(&b->e[slot].w[k], w[k], __ATOMIC_RELAXED);
     }
 
-    __atomic_store_n(&b->seq, s + 2, __ATOMIC_RELEASE);
+    __atomic_store_n(&b->seq, s, __ATOMIC_RELEASE);
+
+    ngx_shmtx_unlock(&shpool->mutex);
+}
+
+
+/* addr NULL: every entry of the set */
+void
+sw_cache_drop(ngx_shm_zone_t *zone, uint64_t ident, const u_char *addr)
+{
+    uint8_t           tag;
+    uint32_t          s;
+    ngx_uint_t        i;
+    sw_cache_t       *c;
+    sw_bucket_t      *b;
+    ngx_slab_pool_t  *shpool;
+
+    c = zone->data;
+    shpool = (ngx_slab_pool_t *) zone->shm.addr;
+
+    ngx_shmtx_lock(&shpool->mutex);
+
+    __atomic_store_n(&c->changes, c->changes + 1, __ATOMIC_RELEASE);
+
+    if (addr == NULL) {
+        __atomic_store_n(&c->epochs[ident % SW_EPOCHS],
+                         c->epochs[ident % SW_EPOCHS] + 1, __ATOMIC_RELEASE);
+        ngx_shmtx_unlock(&shpool->mutex);
+        return;
+    }
+
+    ident = sw_cache_epoch_ident(c, ident);
+    b = sw_cache_bucket(c, ident, addr, &tag);
+    s = sw_bucket_begin(b);
+
+    for (i = 0; i < SW_WAYS; i++) {
+        if (b->tag[i] == tag && sw_entry_matches(b->e[i].w, ident, addr)) {
+            __atomic_store_n(&b->tag[i], 0, __ATOMIC_RELAXED);
+        }
+    }
+
+    __atomic_store_n(&b->seq, s, __ATOMIC_RELEASE);
 
     ngx_shmtx_unlock(&shpool->mutex);
 }

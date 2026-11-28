@@ -22,6 +22,8 @@ enum Backend {
         table: Vec<u8>,
         /// last time the set was seen to exist
         checked_ms: u64,
+        /// changes cannot be pinned to one address
+        interval: bool,
     },
 }
 
@@ -175,7 +177,9 @@ impl Engine {
                     let (seq, code) = match r {
                         Reply::Ack { seq, errno } => (seq, errno),
                         Reply::Done { seq } => (seq, 0),
-                        Reply::Data { subsys, cmd, attrs } => {
+                        Reply::Data {
+                            subsys, cmd, attrs, ..
+                        } => {
                             on_data(subsys, cmd, attrs);
                             return;
                         }
@@ -422,7 +426,8 @@ impl Engine {
                     }
                     e if nft.is_none() && e == -nl::IPSET_ERR_EXIST => decided |= b,
                     e if e == -libc::ENOENT
-                        && nft.is_some_and(|t| now.saturating_sub(t) < NFT_RECHECK_MS) =>
+                        && nft
+                            .is_some_and(|t| t != 0 && now.saturating_sub(t) < NFT_RECHECK_MS) =>
                     {
                         decided |= b
                     }
@@ -446,6 +451,87 @@ impl Engine {
             ));
         }
         self.res = res;
+    }
+
+    /// Changes from the nftables notification socket, coalesced. A lost or
+    /// truncated notification drops every nft set.
+    fn nft_events(&mut self, fd: i32, out: &mut Vec<Change>) {
+        let mut lost = false;
+        for _ in 0..16 {
+            let k = match sys::recv_many(fd, &mut self.rbuf, RCHUNK, &mut self.rlens) {
+                Ok(k) => k,
+                Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => break,
+                Err(e) if e.raw_os_error() == Some(libc::ENOBUFS) => {
+                    lost = true;
+                    continue;
+                }
+                Err(_) => {
+                    lost = true;
+                    break;
+                }
+            };
+            for i in 0..k {
+                let (len, flags) = self.rlens[i];
+                if flags & libc::MSG_TRUNC != 0 || len > RCHUNK {
+                    lost = true;
+                    continue;
+                }
+                let sets = &self.sets;
+                let r = nl::parse_each(&self.rbuf[i * RCHUNK..i * RCHUNK + len], |r| {
+                    if let Reply::Data {
+                        subsys,
+                        cmd,
+                        family,
+                        attrs,
+                    } = r
+                    {
+                        if subsys == nl::NFNL_SUBSYS_NFTABLES {
+                            nft_changes(sets, family, cmd, attrs, out);
+                        }
+                    }
+                });
+                lost |= r.is_err();
+            }
+            if k < RCHUNKS {
+                break;
+            }
+        }
+        if lost {
+            log!("nftables notifications lost; dropping the cache of every nft set");
+            out.clear();
+            for (i, s) in self.sets.iter().enumerate() {
+                if matches!(s.backend, Backend::Nft { .. }) {
+                    out.push(Change::Set(i));
+                }
+            }
+            return;
+        }
+        // many addresses of one set: drop the set instead
+        let mut whole = vec![false; self.sets.len()];
+        let mut count = vec![0usize; self.sets.len()];
+        for c in out.iter() {
+            match *c {
+                Change::Set(i) => whole[i] = true,
+                Change::Addr(i, _) => count[i] += 1,
+            }
+        }
+        for i in 0..self.sets.len() {
+            if count[i] > 64 {
+                whole[i] = true;
+            }
+        }
+        out.retain(|c| !matches!(*c, Change::Addr(i, _) if whole[i]));
+        out.retain(|c| !matches!(*c, Change::Set(_)));
+        out.dedup();
+        for (i, w) in whole.iter().enumerate() {
+            if *w {
+                out.push(Change::Set(i));
+                // it may be gone: the next -ENOENT checks at once
+                if let Backend::Nft { checked_ms, .. } = &mut self.sets[i].backend {
+                    *checked_ms = 0;
+                }
+            }
+        }
     }
 
     /// Re-check after -ENOENT that an nft set still exists and fits.
@@ -635,6 +721,100 @@ impl Engine {
     }
 }
 
+/// What a change notification means for the cache.
+#[derive(Debug, PartialEq, Eq)]
+enum Change {
+    /// one address of a set
+    Addr(usize, Addr),
+    /// every address of a set
+    Set(usize),
+}
+
+/// Changes an nftables notification makes to the configured sets.
+fn nft_changes(sets: &[SetInfo], family: u8, cmd: u16, attrs: &[u8], out: &mut Vec<Change>) {
+    let mut table: &[u8] = &[];
+    let mut name: &[u8] = &[];
+    let mut elements: Option<&[u8]> = None;
+    let cstr = |v: &[u8]| v.split(|&c| c == 0).next().unwrap_or(&[]).to_vec();
+    for (ty, v) in nl::attrs(attrs).flatten() {
+        match (cmd, ty) {
+            (
+                nl::NFT_MSG_NEWTABLE | nl::NFT_MSG_DELTABLE | nl::NFT_MSG_DESTROYTABLE,
+                nl::NFTA_TABLE_NAME,
+            ) => table = v,
+            (_, nl::NFTA_SET_TABLE) => table = v,
+            (_, nl::NFTA_SET_NAME) => name = v,
+            (_, nl::NFTA_SET_ELEM_LIST_ELEMENTS) => elements = Some(v),
+            _ => {}
+        }
+    }
+    let (table, name) = (cstr(table), cstr(name));
+    let watched = |s: &SetInfo, by_name: bool| match &s.backend {
+        Backend::Nft {
+            family: f,
+            table: t,
+            ..
+        } => *f == family && *t == table && (!by_name || s.name == name),
+        Backend::Ipset { .. } => false,
+    };
+    match cmd {
+        nl::NFT_MSG_NEWTABLE | nl::NFT_MSG_DELTABLE | nl::NFT_MSG_DESTROYTABLE => {
+            for (i, s) in sets.iter().enumerate() {
+                if watched(s, false) {
+                    out.push(Change::Set(i));
+                }
+            }
+        }
+        nl::NFT_MSG_NEWSET | nl::NFT_MSG_DELSET | nl::NFT_MSG_DESTROYSET => {
+            if let Some(i) = sets.iter().position(|s| watched(s, true)) {
+                out.push(Change::Set(i));
+            }
+        }
+        nl::NFT_MSG_NEWSETELEM | nl::NFT_MSG_DELSETELEM | nl::NFT_MSG_DESTROYSETELEM => {
+            let Some(i) = sets.iter().position(|s| watched(s, true)) else {
+                return;
+            };
+            let interval = matches!(sets[i].backend, Backend::Nft { interval: true, .. });
+            let start = out.len();
+            let mut exact = !interval && elements.is_some();
+            for (ty, elem) in nl::attrs(elements.unwrap_or(&[])).flatten() {
+                if ty != nl::NFTA_LIST_ELEM || !exact {
+                    continue;
+                }
+                let mut key: Option<&[u8]> = None;
+                for (ety, ev) in nl::attrs(elem).flatten() {
+                    match ety {
+                        nl::NFTA_SET_ELEM_KEY => {
+                            key = nl::attrs(ev)
+                                .flatten()
+                                .find(|(t, _)| *t == nl::NFTA_DATA_VALUE)
+                                .map(|(_, d)| d)
+                        }
+                        nl::NFTA_SET_ELEM_KEY_END => exact = false,
+                        _ => {}
+                    }
+                }
+                match key {
+                    Some(k) if k.len() == 4 => {
+                        out.push(Change::Addr(i, Addr::V4([k[0], k[1], k[2], k[3]])))
+                    }
+                    Some(k) if k.len() == 16 => {
+                        let mut a = [0u8; 16];
+                        a.copy_from_slice(k);
+                        out.push(Change::Addr(i, Addr::V6(a)))
+                    }
+                    _ => exact = false,
+                }
+            }
+            if !exact || out.len() == start {
+                out.truncate(start);
+                out.push(Change::Set(i));
+            }
+        }
+        _ => {}
+    }
+}
+
 fn addr_slice(addr: &Addr) -> &[u8] {
     match addr {
         Addr::V4(a) => a,
@@ -785,11 +965,12 @@ pub fn run(restarted: bool) -> ! {
     let now = sys::monotonic_ms();
     for s in &policy.sets {
         let (mut rs, backend) = if s.backend == proto::BACKEND_NFT {
-            let (rs, _) = eng.describe_nft(s.family, &s.table, &s.name, s.role);
+            let (rs, interval) = eng.describe_nft(s.family, &s.table, &s.name, s.role);
             let b = Backend::Nft {
                 family: s.family,
                 table: s.table.clone(),
                 checked_ms: now,
+                interval,
             };
             (rs, b)
         } else {
@@ -851,11 +1032,35 @@ pub fn run(restarted: bool) -> ! {
         sys::epoll_create().unwrap_or_else(|e| fail(proto::ERR_SANDBOX, "epoll_create", Some(e)));
     let _ = sys::epoll_add(ep, proto::FD_CTL);
     let mut open_slots = 0u32;
+    let mut slot_open = vec![false; policy.nslots as usize];
     for i in 0..policy.nslots as i32 {
         if sys::epoll_add(ep, proto::FD_SLOT0 + i).is_ok() {
             open_slots += 1;
+            slot_open[i as usize] = true;
         }
     }
+
+    // before the sandbox: it allows no new sockets
+    let events = if eng
+        .sets
+        .iter()
+        .any(|s| matches!(s.backend, Backend::Nft { .. }))
+    {
+        match sys::netlink_nft_events() {
+            Ok(fd) if sys::epoll_add(ep, fd).is_ok() => Some(fd),
+            Ok(fd) => {
+                sys::close(fd);
+                None
+            }
+            Err(e) => {
+                log!("nftables change notifications unavailable: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut changes: Vec<Change> = Vec::new();
 
     if let Some(errno) = harden() {
         let log = proto::encode_log(proto::LVL_NOTICE, proto::LOG_LANDLOCK, errno as u64);
@@ -942,6 +1147,13 @@ pub fn run(restarted: bool) -> ! {
                 continue;
             }
 
+            if Some(fd) == events {
+                changes.clear();
+                eng.nft_events(fd, &mut changes);
+                deliver(&changes, &slot_open);
+                continue;
+            }
+
             // up to 64 frames per worker and pass, as before
             let got = match sys::recv_frames(fd, &mut frames, FRAME_SLOT, &mut flens) {
                 Ok(k) => k,
@@ -993,6 +1205,7 @@ pub fn run(restarted: bool) -> ! {
                 if let Some(reason) = close {
                     close_slot(ep, fd, reason);
                     closed.push(fd);
+                    slot_open[(fd - proto::FD_SLOT0) as usize] = false;
                     open_slots -= 1;
                     // nothing more goes to this descriptor number
                     lookups.retain(|l| l.fd != fd);
@@ -1034,6 +1247,7 @@ pub fn run(restarted: bool) -> ! {
                 Err(_) => {
                     close_slot(ep, fd, None);
                     closed.push(fd);
+                    slot_open[(fd - proto::FD_SLOT0) as usize] = false;
                     open_slots -= 1;
                 }
             }
@@ -1041,6 +1255,22 @@ pub fn run(restarted: bool) -> ! {
 
         if open_slots == 0 {
             sys::exit(0);
+        }
+    }
+}
+
+/// Each change to one worker: the cache is shared.
+fn deliver(changes: &[Change], slot_open: &[bool]) {
+    for c in changes {
+        let frame = match *c {
+            Change::Addr(i, a) => proto::encode_inval(i as u32, Some(a)),
+            Change::Set(i) => proto::encode_inval(i as u32, None),
+        };
+        let sent = (0..slot_open.len())
+            .filter(|&s| slot_open[s])
+            .any(|s| sys::send(proto::FD_SLOT0 + s as i32, &frame).is_ok());
+        if !sent {
+            log!("could not pass on an nftables change: no worker accepts it");
         }
     }
 }
@@ -1081,6 +1311,106 @@ mod tests {
             &a4([192, 168, 0, 0]),
             16
         ));
+    }
+
+    fn nft_set(name: &[u8], interval: bool) -> SetInfo {
+        SetInfo {
+            name: name.to_vec(),
+            family: nl::NFPROTO_IPV4,
+            backend: Backend::Nft {
+                family: proto::NFPROTO_INET,
+                table: b"filter".to_vec(),
+                checked_ms: 0,
+                interval,
+            },
+            default_timeout: 0,
+        }
+    }
+
+    /// attributes of an element message as nftables sends it
+    fn elem_attrs(set: &[u8], key: &[u8]) -> Vec<u8> {
+        let mut m = Vec::new();
+        nl::msg_nft_get(&mut m, 1, proto::NFPROTO_INET, b"filter", set, key);
+        m[20..].to_vec()
+    }
+
+    #[test]
+    fn nft_notifications() {
+        let sets = [nft_set(b"ban", false), nft_set(b"nets", true)];
+        let mut out = Vec::new();
+        let inet = proto::NFPROTO_INET;
+
+        nft_changes(
+            &sets,
+            inet,
+            nl::NFT_MSG_NEWSETELEM,
+            &elem_attrs(b"ban", &[192, 0, 2, 7]),
+            &mut out,
+        );
+        assert_eq!(out, [Change::Addr(0, Addr::V4([192, 0, 2, 7]))]);
+
+        out.clear();
+        nft_changes(
+            &sets,
+            inet,
+            nl::NFT_MSG_DELSETELEM,
+            &elem_attrs(b"ban", &[0x20; 16]),
+            &mut out,
+        );
+        assert_eq!(out, [Change::Addr(0, Addr::V6([0x20; 16]))]);
+
+        out.clear();
+        nft_changes(
+            &sets,
+            inet,
+            nl::NFT_MSG_NEWSETELEM,
+            &elem_attrs(b"nets", &[198, 51, 100, 0]),
+            &mut out,
+        );
+        assert_eq!(out, [Change::Set(1)], "interval sets drop everything");
+
+        out.clear();
+        nft_changes(
+            &sets,
+            inet,
+            nl::NFT_MSG_NEWSETELEM,
+            &elem_attrs(b"other", &[1, 2, 3, 4]),
+            &mut out,
+        );
+        nft_changes(
+            &sets,
+            proto::NFPROTO_IPV4,
+            nl::NFT_MSG_NEWSETELEM,
+            &elem_attrs(b"ban", &[1, 2, 3, 4]),
+            &mut out,
+        );
+        assert!(out.is_empty(), "other sets and families are not watched");
+
+        out.clear();
+        let mut m = Vec::new();
+        nl::msg_nft_getset(&mut m, 1, inet, b"filter", b"ban");
+        nft_changes(&sets, inet, nl::NFT_MSG_DELSET, &m[20..], &mut out);
+        assert_eq!(out, [Change::Set(0)]);
+
+        out.clear();
+        let mut t = Vec::new();
+        let mut b = nl::Builder::nft(&mut t, nl::NFT_MSG_DELTABLE, 0, 1, inet);
+        b.attr_str(nl::NFTA_TABLE_NAME, b"filter");
+        b.finish();
+        nft_changes(&sets, inet, nl::NFT_MSG_DELTABLE, &t[20..], &mut out);
+        assert_eq!(out, [Change::Set(0), Change::Set(1)]);
+    }
+
+    #[test]
+    fn inval_frame() {
+        let f = proto::encode_inval(3, Some(Addr::V4([192, 0, 2, 1])));
+        assert_eq!(f.len(), 48);
+        assert_eq!(f[3], proto::ST_INVALIDATE);
+        assert_eq!(&f[4..8], &[0; 4], "req_id 0");
+        assert_eq!(u32::from_ne_bytes([f[8], f[9], f[10], f[11]]), 3);
+        assert_eq!(f[12], 4);
+        assert_eq!(&f[16..20], &[192, 0, 2, 1]);
+        assert_eq!(proto::encode_inval(1, None)[12], 0);
     }
 
     #[test]

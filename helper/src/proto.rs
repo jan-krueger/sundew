@@ -1,6 +1,6 @@
 //! Wire formats. Mirror: src/sw_proto.h
 
-pub const PROTO_VERSION: u8 = 3;
+pub const PROTO_VERSION: u8 = 4;
 pub const FRAME_MAGIC: u16 = 0x5357;
 pub const MAX_SETS: usize = 64;
 pub const MAX_RULES: usize = 64;
@@ -56,6 +56,7 @@ pub const ST_ERROR: u8 = 3;
 pub const ST_SET_MISSING: u8 = 4;
 pub const ST_DRAINING: u8 = 5;
 pub const ST_LOG: u8 = 0x80;
+pub const ST_INVALIDATE: u8 = 0x40;
 
 // nginx log levels
 pub const LVL_ALERT: u8 = 2;
@@ -82,6 +83,7 @@ pub const VIOLATION_MASK: u64 = 3;
 
 pub const REQ_LEN: usize = 48;
 pub const REP_LEN: usize = 24;
+pub const INVAL_LEN: usize = 48;
 
 fn u16_at(b: &[u8], o: usize) -> u16 {
     u16::from_ne_bytes([b[o], b[o + 1]])
@@ -392,6 +394,28 @@ pub fn encode_rep(status: u8, req_id: u32, decided: u64, matched: u64) -> [u8; R
     r[4..8].copy_from_slice(&req_id.to_ne_bytes());
     r[8..16].copy_from_slice(&decided.to_ne_bytes());
     r[16..24].copy_from_slice(&matched.to_ne_bytes());
+    r
+}
+
+/// An nftables set changed: drop cached answers for `addr`, or for every
+/// address if None.
+pub fn encode_inval(set: u32, addr: Option<Addr>) -> [u8; INVAL_LEN] {
+    let mut r = [0u8; INVAL_LEN];
+    r[0..2].copy_from_slice(&FRAME_MAGIC.to_ne_bytes());
+    r[2] = PROTO_VERSION;
+    r[3] = ST_INVALIDATE;
+    r[8..12].copy_from_slice(&set.to_ne_bytes());
+    match addr {
+        Some(Addr::V4(a)) => {
+            r[12] = 4;
+            r[16..20].copy_from_slice(&a);
+        }
+        Some(Addr::V6(a)) => {
+            r[12] = 6;
+            r[16..32].copy_from_slice(&a);
+        }
+        None => {}
+    }
     r
 }
 

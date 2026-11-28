@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define SW_PROTO_VERSION        3
+#define SW_PROTO_VERSION        4
 #define SW_FRAME_MAGIC          0x5357          /* "SW" */
 #define SW_MAX_SETS             64
 #define SW_SETNAME_LEN          32              /* IPSET_MAXNAMELEN */
@@ -183,6 +183,21 @@ typedef struct {
     uint64_t  matched;
 } sw_rep_t;
 
+/* helper -> one worker: an nftables set changed; drop cached answers */
+#define SW_ST_INVALIDATE        0x40
+
+typedef struct {
+    uint16_t  magic;
+    uint8_t   version;
+    uint8_t   status;                           /* SW_ST_INVALIDATE */
+    uint32_t  req_id;                           /* 0 */
+    uint32_t  set;                              /* set index */
+    uint8_t   family;                           /* 4, 6; 0: every address */
+    uint8_t   zero0[3];
+    uint8_t   addr[16];
+    uint8_t   zero1[16];
+} sw_inval_t;
+
 
 _Static_assert(sizeof(sw_policy_hdr_t) == 40, "policy hdr");
 _Static_assert(sizeof(sw_policy_rule_t) == 16, "policy rule");
@@ -196,5 +211,7 @@ _Static_assert(offsetof(sw_req_t, arg) == 8, "req.arg");
 _Static_assert(offsetof(sw_req_t, family) == 16, "req.family");
 _Static_assert(offsetof(sw_req_t, addr) == 24, "req.addr");
 _Static_assert(sizeof(sw_rep_t) == 24, "rep");
+_Static_assert(sizeof(sw_inval_t) == 48, "inval");
+_Static_assert(offsetof(sw_inval_t, addr) == 16, "inval.addr");
 
 #endif /* SW_PROTO_H */

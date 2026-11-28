@@ -30,6 +30,7 @@ typedef struct {
     ngx_uint_t       late;              /* timed out, waiting for the answer */
     ngx_uint_t       op;
     uint64_t         mask;              /* TEST: sets; ADD: rule */
+    uint64_t         changes;           /* sw_cache_changes() when sent */
     ngx_uint_t       family;
     u_char           addr[16];
 } sw_pending_t;
@@ -52,8 +53,9 @@ static void sw_client_complete(sw_pending_t *p, ngx_uint_t result,
     uint64_t decided, uint64_t matched);
 static void sw_client_fail_all(ngx_uint_t result);
 static void sw_client_log(ngx_log_t *log, sw_rep_t *rep);
-static void sw_client_reply(ngx_log_t *log, sw_rep_t *rep, size_t len,
+static void sw_client_reply(ngx_log_t *log, sw_inval_t *frame, size_t len,
     int flags);
+static void sw_client_invalidate(ngx_log_t *log, sw_inval_t *inv);
 static void sw_client_release(sw_pending_t *p);
 
 
@@ -137,6 +139,22 @@ sw_client_hash(ngx_uint_t op, uint64_t mask, ngx_uint_t family,
  * its way; NGX_DECLINED: nothing sent, *result says why.
  */
 
+static uint64_t
+sw_client_cache_changes(void)
+{
+    ngx_sundew_core_conf_t  *scf;
+
+    scf = (ngx_sundew_core_conf_t *) ngx_get_conf(ngx_cycle->conf_ctx,
+                                                  ngx_sundew_core_module);
+
+    if (scf->cache_zone == NULL || scf->cache_zone->data == NULL) {
+        return 0;
+    }
+
+    return sw_cache_changes(scf->cache_zone);
+}
+
+
 static ngx_int_t
 sw_client_request(ngx_uint_t op, uint64_t mask, ngx_uint_t family,
     const u_char *addr, ngx_msec_t timeout, sw_pending_t **pp,
@@ -216,6 +234,7 @@ sw_client_request(ngx_uint_t op, uint64_t mask, ngx_uint_t family,
     p->hash = hash;
     p->op = op;
     p->mask = mask;
+    p->changes = sw_client_cache_changes();
     p->family = family;
     ngx_memzero(p->addr, sizeof(p->addr));
     ngx_memcpy(p->addr, addr, len);
@@ -307,7 +326,7 @@ sw_client_add_done(sw_pending_t *p, ngx_uint_t status, uint64_t decided)
         if (scf->cache_zone && scf->cache_zone->data) {
             sw_cache_addr(addr, p->family, p->addr);
             sw_cache_put(scf->cache_zone, set[rule[p->mask].set].ident, addr,
-                         SW_VERDICT_IN, rule[p->mask].timeout);
+                         SW_VERDICT_IN, rule[p->mask].timeout, SW_CACHE_ANY);
         }
 
     } else if (status == SW_ST_DENIED) {
@@ -355,7 +374,7 @@ sw_client_store(sw_pending_t *p, uint64_t decided, uint64_t matched)
             sw_cache_put(scf->cache_zone, set[i].ident, addr,
                          (matched & ((uint64_t) 1 << i)) ? SW_VERDICT_IN
                                                          : SW_VERDICT_NOT_IN,
-                         0);
+                         0, p->changes);
         }
     }
 }
@@ -485,7 +504,7 @@ static void
 sw_client_read_handler(ngx_event_t *rev)
 {
     int                i, n;
-    sw_rep_t           reps[SW_RECV_BATCH];
+    sw_inval_t         reps[SW_RECV_BATCH];    /* the larger frame */
     ngx_err_t          err;
     struct iovec       iov[SW_RECV_BATCH];
     struct mmsghdr     msgs[SW_RECV_BATCH];
@@ -495,7 +514,7 @@ sw_client_read_handler(ngx_event_t *rev)
 
     for (i = 0; i < SW_RECV_BATCH; i++) {
         iov[i].iov_base = &reps[i];
-        iov[i].iov_len = sizeof(sw_rep_t);
+        iov[i].iov_len = sizeof(sw_inval_t);
     }
 
     for ( ;; ) {
@@ -550,9 +569,53 @@ sw_client_read_handler(ngx_event_t *rev)
 
 
 static void
-sw_client_reply(ngx_log_t *log, sw_rep_t *rep, size_t len, int flags)
+sw_client_invalidate(ngx_log_t *log, sw_inval_t *inv)
 {
+    u_char                   addr[16];
+    ngx_sundew_set_t        *set;
+    ngx_sundew_core_conf_t  *scf;
+
+    scf = (ngx_sundew_core_conf_t *) ngx_get_conf(ngx_cycle->conf_ctx,
+                                                  ngx_sundew_core_module);
+
+    if (inv->set >= scf->sets.nelts || scf->cache_zone == NULL
+        || scf->cache_zone->data == NULL)
+    {
+        return;
+    }
+
+    set = scf->sets.elts;
+
+    if (inv->family == 4 || inv->family == 6) {
+        sw_cache_addr(addr, inv->family, inv->addr);
+        sw_cache_drop(scf->cache_zone, set[inv->set].ident, addr);
+
+    } else {
+        sw_cache_drop(scf->cache_zone, set[inv->set].ident, NULL);
+    }
+
+    ngx_log_debug3(NGX_LOG_DEBUG_HTTP, log, 0,
+                   "sundew set \"%V\" changed (family %d, set index %uD)",
+                   &set[inv->set].name, (int) inv->family, inv->set);
+}
+
+
+static void
+sw_client_reply(ngx_log_t *log, sw_inval_t *frame, size_t len, int flags)
+{
+    sw_rep_t      *rep;
     sw_pending_t  *p;
+
+    rep = (sw_rep_t *) frame;
+
+    if (len == sizeof(sw_inval_t) && !(flags & MSG_TRUNC)
+        && frame->magic == SW_FRAME_MAGIC
+        && frame->version == SW_PROTO_VERSION
+        && frame->status == SW_ST_INVALIDATE && frame->req_id == 0)
+    {
+        sw_client_invalidate(log, frame);
+        return;
+    }
 
     if (len != sizeof(sw_rep_t) || (flags & MSG_TRUNC)
         || rep->magic != SW_FRAME_MAGIC || rep->version != SW_PROTO_VERSION)

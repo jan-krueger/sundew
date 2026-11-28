@@ -5,13 +5,22 @@ pub const NFNL_SUBSYS_NFTABLES: u16 = 10;
 const NFNL_MSG_BATCH_BEGIN: u16 = 0x10;
 const NFNL_MSG_BATCH_END: u16 = 0x11;
 
+pub const NFT_MSG_NEWTABLE: u16 = 0;
+pub const NFT_MSG_DELTABLE: u16 = 2;
 pub const NFT_MSG_NEWSET: u16 = 9;
+pub const NFT_MSG_DELSET: u16 = 11;
+pub const NFT_MSG_DELSETELEM: u16 = 14;
+pub const NFT_MSG_DESTROYTABLE: u16 = 26;
+pub const NFT_MSG_DESTROYSET: u16 = 29;
+pub const NFT_MSG_DESTROYSETELEM: u16 = 30;
+pub const NFTA_TABLE_NAME: u16 = 1;
+pub const NFTA_SET_ELEM_KEY_END: u16 = 9;
 const NFT_MSG_GETSET: u16 = 10;
-const NFT_MSG_NEWSETELEM: u16 = 12;
+pub const NFT_MSG_NEWSETELEM: u16 = 12;
 const NFT_MSG_GETSETELEM: u16 = 13;
 
-const NFTA_SET_TABLE: u16 = 1;
-const NFTA_SET_NAME: u16 = 2;
+pub const NFTA_SET_TABLE: u16 = 1;
+pub const NFTA_SET_NAME: u16 = 2;
 pub const NFTA_SET_FLAGS: u16 = 3;
 pub const NFTA_SET_KEY_TYPE: u16 = 4;
 pub const NFTA_SET_KEY_LEN: u16 = 5;
@@ -30,13 +39,13 @@ pub const NFT_SET_CONCAT: u32 = 0x80;
 pub const NFT_TYPE_IPADDR: u32 = 7;
 pub const NFT_TYPE_IP6ADDR: u32 = 8;
 
-const NFTA_SET_ELEM_LIST_TABLE: u16 = 1;
-const NFTA_SET_ELEM_LIST_SET: u16 = 2;
-const NFTA_SET_ELEM_LIST_ELEMENTS: u16 = 3;
-const NFTA_LIST_ELEM: u16 = 1;
-const NFTA_SET_ELEM_KEY: u16 = 1;
+pub const NFTA_SET_ELEM_LIST_TABLE: u16 = 1;
+pub const NFTA_SET_ELEM_LIST_SET: u16 = 2;
+pub const NFTA_SET_ELEM_LIST_ELEMENTS: u16 = 3;
+pub const NFTA_LIST_ELEM: u16 = 1;
+pub const NFTA_SET_ELEM_KEY: u16 = 1;
 const NFTA_SET_ELEM_TIMEOUT: u16 = 4;
-const NFTA_DATA_VALUE: u16 = 1;
+pub const NFTA_DATA_VALUE: u16 = 1;
 
 pub const IPSET_PROTOCOL: u8 = 7;
 pub const IPSET_PROTOCOL_MIN: u8 = 6;
@@ -360,6 +369,8 @@ pub enum Reply<'a> {
     Data {
         subsys: u16,
         cmd: u16,
+        /// nfgenmsg family: the table family for nftables
+        family: u8,
         attrs: &'a [u8],
     },
 }
@@ -402,6 +413,7 @@ pub fn parse_each<'a>(buf: &'a [u8], mut f: impl FnMut(Reply<'a>)) -> Result<(),
                 f(Reply::Data {
                     subsys: t >> 8,
                     cmd: t & 0xff,
+                    family: body[0],
                     attrs: &body[NFGEN_HDRLEN..],
                 });
             }

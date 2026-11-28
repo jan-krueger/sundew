@@ -386,6 +386,50 @@ pub fn netlink_socket() -> io::Result<i32> {
 
 pub const NETLINK_RCVBUF: libc::c_int = 4 << 20;
 
+/// Netlink socket that receives the nftables change notifications.
+pub fn netlink_nft_events() -> io::Result<i32> {
+    const NFNLGRP_NFTABLES: u32 = 7;
+    // SAFETY: plain syscalls.
+    let fd = checki(unsafe {
+        libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            libc::NETLINK_NETFILTER,
+        )
+    })?;
+    // SAFETY: zeroed sockaddr_nl is valid.
+    let mut sa: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+    sa.nl_family = libc::AF_NETLINK as u16;
+    sa.nl_groups = 1 << (NFNLGRP_NFTABLES - 1);
+    if let Err(e) = checki(unsafe {
+        libc::bind(
+            fd,
+            &sa as *const _ as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_nl>() as u32,
+        )
+    }) {
+        close(fd);
+        return Err(e);
+    }
+    let rcvbuf: libc::c_int = 16 << 20;
+    for opt in [libc::SO_RCVBUFFORCE, libc::SO_RCVBUF] {
+        // SAFETY: int option.
+        let r = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                opt,
+                &rcvbuf as *const _ as *const _,
+                4,
+            )
+        };
+        if r == 0 {
+            break;
+        }
+    }
+    Ok(fd)
+}
+
 /// Datagrams into consecutive `chunk`-sized pieces of `buf`, without
 /// waiting: (count, lens and msg_flags in `out`).
 pub fn recv_many(
