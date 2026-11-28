@@ -1,6 +1,7 @@
 #!/bin/bash
 # Throughput and latency of the release image. Runs on the host.
 # Usage: run.sh <release-image> <dev-image>
+# ONLY="4 5": run only these cases (0-based). PROFILE=1: CPU % of engine and workers per case.
 set -eu
 IMAGE=$1
 DEV=$2
@@ -55,23 +56,40 @@ docker run -d --name $C --cap-add NET_ADMIN --network container:$NS --cpuset-cpu
 sleep 2
 
 cat > "$CONF/random.lua" <<'LUA'
--- a different client address on every request, none of them in a set
-local n = 0
+-- a different client address on every request, none of them in a set;
+-- each wrk thread has its own Lua state, so each needs its own seed
+local threads = 0
+setup = function(thread)
+  threads = threads + 1
+  thread:set("seed", threads)
+end
+init = function()
+  math.randomseed(seed * 7919 + os.time())
+end
 request = function()
-  n = n + 1
   local ip = string.format("10.%d.%d.%d", 100 + math.random(0, 150), math.random(0, 255), math.random(1, 254))
   return wrk.format(nil, nil, { ["X-Forwarded-For"] = ip })
 end
 LUA
 docker cp "$CONF/random.lua" $NS:/tmp/random.lua
 
+ticks() {   # comm -> summed utime+stime of its processes in the nginx container
+    docker top $C -eo pid,comm | awk -v c="$1" '$2 == c { print $1 }' |
+        while read -r p; do awk '{ print $14 + $15 }' /proc/"$p"/stat 2>/dev/null; done | awk '{ s += $1 } END { print s + 0 }'
+}
+
 run() {   # path, address or "random" -> "req/s mean-latency-ms"
-    local args=(-H "X-Forwarded-For: $2")
+    local args=(-H "X-Forwarded-For: $2") e0 w0
     [ "$2" = random ] && args=(-s /tmp/random.lua)
+    [ -n "${PROFILE:-}" ] && { e0=$(ticks sundew-engine); w0=$(ticks nginx); }
     docker exec $NS wrk -t 4 -c 64 -d "${DURATION}s" --latency "${args[@]}" "http://127.0.0.1$1" 2>/dev/null |
         awk '/^Requests\/sec/ { rps = $2 }
              /^    Latency/ { v = $2; if (v ~ /us$/) v = v / 1000; else if (v ~ /ms$/) v = v + 0; else v = v * 1000; lat = v }
              END { printf "%s %.2f\n", rps, lat }'
+    if [ -n "${PROFILE:-}" ]; then
+        local hz; hz=$(getconf CLK_TCK)
+        echo "  $1 $2: engine $(( ($(ticks sundew-engine) - e0) * 100 / hz / DURATION ))%, nginx $(( ($(ticks nginx) - w0) * 100 / hz / DURATION ))% (of one CPU)" >&2
+    fi
 }
 
 median() { sort -n | awk '{ a[NR] = $0 } END { print a[int((NR + 1) / 2)] }'; }
@@ -83,13 +101,14 @@ CASES=(
     "No cache: helper and kernel on every request|/nocache|192.0.2.9"
     "A new address on every request (all misses)|/hit|random"
     "All misses, set of 1,000,000 entries|/big|random"
-    "Cache hit plus ipset_ratelimit, many clients|/rl|random"
+    "All misses plus ipset_ratelimit|/rl|random"
 )
 
 # every round runs every case once, so drift (heat, turbo) spreads evenly
 declare -A RPS LAT
 for round in $(seq 1 "$ROUNDS"); do
     for i in "${!CASES[@]}"; do
+        [ -n "${ONLY:-}" ] && ! grep -qw "$i" <<<"$ONLY" && continue
         IFS='|' read -r _ path addr <<<"${CASES[$i]}"
         r=$(run "$path" "$addr")
         RPS[$i]+="${r% *} "
@@ -100,6 +119,7 @@ done
 echo "| Case | Requests/s | Mean latency (ms) |"
 echo "| --- | --- | --- |"
 for i in "${!CASES[@]}"; do
+    [ -n "${ONLY:-}" ] && ! grep -qw "$i" <<<"$ONLY" && continue
     IFS='|' read -r label _ _ <<<"${CASES[$i]}"
     printf '| %s | %s | %s |\n' "$label" \
         "$(tr ' ' '\n' <<<"${RPS[$i]}" | grep . | median | awk '{ printf "%.0f", $1 }')" \
