@@ -8,6 +8,7 @@
   targets.py immutable <tag>                       true if assets cannot be added
   targets.py summary < targets                     one line naming targets (JSON list)
   targets.py next-patch <tag>                      next free patch tag after <tag>
+  targets.py newer-series <tag>                    a tag of a later X.Y than <tag>, if any
   targets.py bump <version> <base> <summary>       version files and CHANGELOG entry
   targets.py changelog <version> <base> <summary>  CHANGELOG entry only
 """
@@ -235,6 +236,14 @@ def next_patch(tag):
     return f"v{major}.{minor}.{max(taken + [patch]) + 1}"
 
 
+def newer_series(tag):
+    base = tuple(int(x) for x in tag.lstrip("v").split("-")[0].split(".")[:2])
+    tags = subprocess.run(["git", "tag", "-l", "v*"], capture_output=True, text=True, check=True).stdout.split()
+    newer = [t for t in tags
+             if (m := re.fullmatch(r"v(\d+)\.(\d+)\.\d+", t)) and (int(m.group(1)), int(m.group(2))) > base]
+    return max(newer, key=lambda t: vkey(t[1:]), default="")
+
+
 def changelog(version, base, text):
     with open("CHANGELOG.md") as f:
         lines = f.read().splitlines()
@@ -291,6 +300,8 @@ def main():
         print(summary(json.load(sys.stdin)))
     elif cmd == "next-patch":
         print(next_patch(sys.argv[2]))
+    elif cmd == "newer-series":
+        print(newer_series(sys.argv[2]))
     elif cmd == "bump":
         bump(*sys.argv[2:5])
     elif cmd == "changelog":

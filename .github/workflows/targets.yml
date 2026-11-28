@@ -35,6 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - id: plan
         env:
@@ -43,6 +44,12 @@ jobs:
         run: |
           base=$(gh release view --json tagName -q .tagName)
           missing=$(python3 .github/scripts/targets.py missing "$base")
+          newer=$(python3 .github/scripts/targets.py newer-series "$base")
+          if [ -n "$newer" ]; then
+              # a release of a later series is on its way; it has every target
+              echo "::notice::$newer is being released after $base; nothing to add"
+              missing="[]"
+          fi
           images=$(echo "$missing" | python3 -c 'import json,sys; print(json.dumps([t for t in json.load(sys.stdin) if t.get("image")]))')
           summary=$(echo "$missing" | python3 .github/scripts/targets.py summary)
           immutable=$(python3 .github/scripts/targets.py immutable "$base")
