@@ -1,13 +1,15 @@
 {
   "comment": "The nginx builds Sundew ships for. Maintained by .github/scripts/targets.py update; edit by hand to add a distribution.",
   "keep_per_track": 2,
-  "test_floor": "1.24.0",
+  "test_floor": "1.18.0",
   "targets": [
-    {"track": "stable",      "nginx": "1.30.8",  "base": "nginx:{v}",        "name": "nginx.org-{v}",        "image": "nginx{v}"},
-    {"track": "stable",      "nginx": "1.30.8",  "base": "nginx:{v}-alpine", "name": "nginx.org-{v}-alpine", "image": "nginx{v}-alpine"},
-    {"track": "mainline",    "nginx": "1.31.10", "base": "nginx:{v}",        "name": "nginx.org-{v}",        "image": "nginx{v}"},
-    {"track": "mainline",    "nginx": "1.31.10", "base": "nginx:{v}-alpine", "name": "nginx.org-{v}-alpine", "image": "nginx{v}-alpine"},
-    {"track": "debian13",    "nginx": "1.26.3",  "base": "debian:trixie",    "name": "debian13-nginx{v}",    "distro": "1"},
-    {"track": "ubuntu24.04", "nginx": "1.24.0",  "base": "ubuntu:24.04",     "name": "ubuntu24.04-nginx{v}", "distro": "1"}
+    {"track": "stable", "nginx": "1.30.8", "base": "nginx:{v}", "name": "nginx.org-{v}", "image": "nginx{v}"},
+    {"track": "stable", "nginx": "1.30.8", "base": "nginx:{v}-alpine", "name": "nginx.org-{v}-alpine", "image": "nginx{v}-alpine"},
+    {"track": "mainline", "nginx": "1.31.10", "base": "nginx:{v}", "name": "nginx.org-{v}", "image": "nginx{v}"},
+    {"track": "mainline", "nginx": "1.31.10", "base": "nginx:{v}-alpine", "name": "nginx.org-{v}-alpine", "image": "nginx{v}-alpine"},
+    {"track": "debian12", "nginx": "1.22.1", "base": "debian:bookworm", "name": "debian12-nginx{v}", "distro": "1"},
+    {"track": "debian13", "nginx": "1.26.3", "base": "debian:trixie", "name": "debian13-nginx{v}", "distro": "1"},
+    {"track": "ubuntu22.04", "nginx": "1.18.0", "base": "ubuntu:22.04", "name": "ubuntu22.04-nginx{v}", "distro": "1"},
+    {"track": "ubuntu24.04", "nginx": "1.24.0", "base": "ubuntu:24.04", "name": "ubuntu24.04-nginx{v}", "distro": "1"}
   ]
 }

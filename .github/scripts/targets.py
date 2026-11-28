@@ -214,7 +214,8 @@ def missing(tag):
 
 
 TRACK_NAMES = {"stable": "nginx.org stable", "mainline": "nginx.org mainline",
-               "debian13": "Debian 13 nginx", "ubuntu24.04": "Ubuntu 24.04 nginx"}
+               "debian12": "Debian 12 nginx", "debian13": "Debian 13 nginx",
+               "ubuntu22.04": "Ubuntu 22.04 nginx", "ubuntu24.04": "Ubuntu 24.04 nginx"}
 
 
 def summary(targets):
