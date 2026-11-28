@@ -30,19 +30,23 @@ By the end of this page nginx returns 403 to an address you put in a set, and
 
 === "Prebuilt module"
 
-    For nginx from nginx.org's packages and images, Debian 13 or Ubuntu 24.04.
-    Pick the tarball for your nginx from the
+    For nginx from nginx.org's packages and images, Debian 12 and 13, and
+    Ubuntu 22.04 and 24.04. Pick the tarball for your nginx from the
     [latest release](https://github.com/jan-krueger/sundew/releases/latest):
 
     | Where nginx came from | Tarball |
     | --- | --- |
     | nginx.org packages or Debian-based images | `sundew-<version>-nginx.org-<nginx>-<arch>.tar.gz` |
     | nginx.org Alpine images | `sundew-<version>-nginx.org-<nginx>-alpine-<arch>.tar.gz` |
+    | Debian 12 `nginx` package | `sundew-<version>-debian12-nginx<nginx>-<arch>.tar.gz` |
     | Debian 13 `nginx` package | `sundew-<version>-debian13-nginx<nginx>-<arch>.tar.gz` |
+    | Ubuntu 22.04 `nginx` package | `sundew-<version>-ubuntu22.04-nginx<nginx>-<arch>.tar.gz` |
     | Ubuntu 24.04 `nginx` package | `sundew-<version>-ubuntu24.04-nginx<nginx>-<arch>.tar.gz` |
 
     `<nginx>` is the version `nginx -v` prints; the module loads only into that
-    version. `<arch>` is `amd64` or `arm64`. The latest release covers the two
+    version. `<arch>` is `amd64` or `arm64`. The nginx.org tarballs need glibc
+    2.34 or later, which Debian 12, Ubuntu 22.04 and RHEL 9 have. The latest
+    release covers the two
     newest nginx.org stable and mainline versions and the distributions'
     current packages. Builds for a new nginx version are added to it once they
     pass the tests; files already published are never replaced.
@@ -70,7 +74,7 @@ By the end of this page nginx returns 403 to an address you put in a set, and
 
 === "From source"
 
-    For any other nginx 1.24 or newer. You need the source of the exact nginx
+    For any other nginx 1.18 or newer. You need the source of the exact nginx
     version you run, a C compiler and Rust 1.85 or newer. Only the module is
     compiled; your nginx stays as it is.
 

@@ -14,8 +14,8 @@ docker run -d --cap-add NET_ADMIN --network host \
     -v "$PWD/sundew.conf:/etc/nginx/conf.d/sundew.conf:ro" ghcr.io/jan-krueger/sundew:latest
 ```
 
-Prebuilt modules exist for the nginx.org packages, Debian 13 and Ubuntu 24.04;
-any other nginx 1.24+ builds from source. See
+Prebuilt modules exist for the nginx.org packages, Debian 12 and 13, and
+Ubuntu 22.04 and 24.04; any other nginx 1.18+ builds from source. See
 [Get started](https://jan-krueger.github.io/sundew/get-started/).
 
 nginx workers keep no privileges. A small helper that nginx starts and

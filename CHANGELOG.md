@@ -14,6 +14,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sets with and without `flags interval`; `ipset_autoadd` and `autoban=` add to
   sets with `flags timeout`. ipset and nftables sets mix in one list, and a
   configuration with only nftables sets does not need the `ip_set` module.
+- Prebuilt modules for Debian 12 (nginx 1.22.1) and Ubuntu 22.04 (nginx
+  1.18.0). nginx 1.18 and later is supported; it was 1.24.
 
 ### Changed
 - Module and helper speak protocol 3: install both from the same release.
@@ -23,6 +25,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 - `ipset_ratelimit` let one request too many through when it arrived just
   after a window boundary.
+- The nginx.org modules needed glibc 2.38 and failed to load into nginx.org's
+  packages on Debian 12 and Ubuntu 22.04. They now need glibc 2.34, and every
+  release build checks that.
 
 ## [0.2.0] - 2026-11-28
 
