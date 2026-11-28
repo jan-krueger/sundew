@@ -90,22 +90,39 @@ fn align4(n: usize) -> usize {
     (n + 3) & !3
 }
 
-pub struct Builder {
-    buf: Vec<u8>,
-    nests: Vec<usize>,
+/// Appends one netlink message to a buffer.
+pub struct Builder<'a> {
+    buf: &'a mut Vec<u8>,
+    start: usize,
+    nests: [usize; 8],
+    depth: usize,
 }
 
-impl Builder {
-    pub fn new(cmd: u16, flags: u16, seq: u32, family: u8) -> Builder {
-        Builder::raw((NFNL_SUBSYS_IPSET << 8) | cmd, flags, seq, family, 0)
+impl<'a> Builder<'a> {
+    pub fn new(buf: &'a mut Vec<u8>, cmd: u16, flags: u16, seq: u32, family: u8) -> Builder<'a> {
+        Builder::raw(buf, (NFNL_SUBSYS_IPSET << 8) | cmd, flags, seq, family, 0)
     }
 
-    pub fn nft(cmd: u16, flags: u16, seq: u32, family: u8) -> Builder {
-        Builder::raw((NFNL_SUBSYS_NFTABLES << 8) | cmd, flags, seq, family, 0)
+    pub fn nft(buf: &'a mut Vec<u8>, cmd: u16, flags: u16, seq: u32, family: u8) -> Builder<'a> {
+        Builder::raw(
+            buf,
+            (NFNL_SUBSYS_NFTABLES << 8) | cmd,
+            flags,
+            seq,
+            family,
+            0,
+        )
     }
 
-    fn raw(ty: u16, flags: u16, seq: u32, family: u8, res_id: u16) -> Builder {
-        let mut buf = Vec::with_capacity(128);
+    fn raw(
+        buf: &'a mut Vec<u8>,
+        ty: u16,
+        flags: u16,
+        seq: u32,
+        family: u8,
+        res_id: u16,
+    ) -> Builder<'a> {
+        let start = buf.len();
         buf.extend_from_slice(&0u32.to_ne_bytes()); // len
         buf.extend_from_slice(&ty.to_ne_bytes());
         buf.extend_from_slice(&flags.to_ne_bytes());
@@ -116,14 +133,19 @@ impl Builder {
         buf.extend_from_slice(&res_id.to_be_bytes());
         Builder {
             buf,
-            nests: Vec::new(),
+            start,
+            nests: [0; 8],
+            depth: 0,
         }
     }
 
-    pub fn attr(&mut self, ty: u16, data: &[u8]) -> &mut Self {
-        let len = 4 + data.len();
+    fn header(&mut self, ty: u16, len: usize) {
         self.buf.extend_from_slice(&(len as u16).to_ne_bytes());
         self.buf.extend_from_slice(&ty.to_ne_bytes());
+    }
+
+    pub fn attr(&mut self, ty: u16, data: &[u8]) -> &mut Self {
+        self.header(ty, 4 + data.len());
         self.buf.extend_from_slice(data);
         self.buf.resize(align4(self.buf.len()), 0);
         self
@@ -134,36 +156,38 @@ impl Builder {
     }
 
     pub fn attr_str(&mut self, ty: u16, s: &[u8]) -> &mut Self {
-        let mut v = s.to_vec();
-        v.push(0);
-        self.attr(ty, &v)
+        self.header(ty, 4 + s.len() + 1);
+        self.buf.extend_from_slice(s);
+        self.buf.push(0);
+        self.buf.resize(align4(self.buf.len()), 0);
+        self
     }
 
     pub fn nest(&mut self, ty: u16) -> &mut Self {
-        self.nests.push(self.buf.len());
-        self.buf.extend_from_slice(&0u16.to_ne_bytes());
-        self.buf
-            .extend_from_slice(&(ty | NLA_F_NESTED).to_ne_bytes());
+        self.nests[self.depth] = self.buf.len();
+        self.depth += 1;
+        self.header(ty | NLA_F_NESTED, 0);
         self
     }
 
     pub fn end(&mut self) -> &mut Self {
-        let start = self.nests.pop().expect("unbalanced nest");
+        self.depth -= 1;
+        let start = self.nests[self.depth];
         let len = (self.buf.len() - start) as u16;
         self.buf[start..start + 2].copy_from_slice(&len.to_ne_bytes());
         self
     }
 
-    pub fn finish(mut self) -> Vec<u8> {
-        assert!(self.nests.is_empty(), "unbalanced nest");
-        let len = self.buf.len() as u32;
-        self.buf[0..4].copy_from_slice(&len.to_ne_bytes());
-        self.buf
+    pub fn finish(self) {
+        assert!(self.depth == 0, "unbalanced nest");
+        let len = (self.buf.len() - self.start) as u32;
+        self.buf[self.start..self.start + 4].copy_from_slice(&len.to_ne_bytes());
     }
 }
 
-pub fn msg_protocol(seq: u32) -> Vec<u8> {
+pub fn msg_protocol(out: &mut Vec<u8>, seq: u32) {
     let mut b = Builder::new(
+        out,
         IPSET_CMD_PROTOCOL,
         NLM_F_REQUEST | NLM_F_ACK,
         seq,
@@ -174,8 +198,9 @@ pub fn msg_protocol(seq: u32) -> Vec<u8> {
 }
 
 /// Header-only LIST: type, family, revision and create options of one set.
-pub fn msg_list_header(seq: u32, proto: u8, set: &[u8]) -> Vec<u8> {
+pub fn msg_list_header(out: &mut Vec<u8>, seq: u32, proto: u8, set: &[u8]) {
     let mut b = Builder::new(
+        out,
         IPSET_CMD_LIST,
         NLM_F_REQUEST | NLM_F_DUMP,
         seq,
@@ -190,22 +215,28 @@ pub fn msg_list_header(seq: u32, proto: u8, set: &[u8]) -> Vec<u8> {
     b.finish()
 }
 
+fn ip_attr(addr: &crate::proto::Addr) -> (u8, u16, &[u8]) {
+    use crate::proto::Addr;
+    match addr {
+        Addr::V4(a) => (NFPROTO_IPV4, IPSET_ATTR_IPADDR_IPV4, a),
+        Addr::V6(a) => (NFPROTO_IPV6, IPSET_ATTR_IPADDR_IPV6, a),
+    }
+}
+
 /// ADD with NLM_F_EXCL: an existing element keeps its timeout. `cidr` only
 /// for hash:net; hash:ip would expand it into a range.
 pub fn msg_add(
+    out: &mut Vec<u8>,
     seq: u32,
     proto: u8,
     set: &[u8],
     addr: &crate::proto::Addr,
     cidr: Option<u8>,
     timeout: u32,
-) -> Vec<u8> {
-    use crate::proto::Addr;
-    let (fam, ty, bytes): (u8, u16, &[u8]) = match addr {
-        Addr::V4(a) => (NFPROTO_IPV4, IPSET_ATTR_IPADDR_IPV4, a),
-        Addr::V6(a) => (NFPROTO_IPV6, IPSET_ATTR_IPADDR_IPV6, a),
-    };
+) {
+    let (fam, ty, bytes) = ip_attr(addr);
     let mut b = Builder::new(
+        out,
         IPSET_CMD_ADD,
         NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL,
         seq,
@@ -228,13 +259,9 @@ pub fn msg_add(
     b.finish()
 }
 
-pub fn msg_test(seq: u32, proto: u8, set: &[u8], addr: &crate::proto::Addr) -> Vec<u8> {
-    use crate::proto::Addr;
-    let (fam, ty, bytes): (u8, u16, &[u8]) = match addr {
-        Addr::V4(a) => (NFPROTO_IPV4, IPSET_ATTR_IPADDR_IPV4, a),
-        Addr::V6(a) => (NFPROTO_IPV6, IPSET_ATTR_IPADDR_IPV6, a),
-    };
-    let mut b = Builder::new(IPSET_CMD_TEST, NLM_F_REQUEST | NLM_F_ACK, seq, fam);
+pub fn msg_test(out: &mut Vec<u8>, seq: u32, proto: u8, set: &[u8], addr: &crate::proto::Addr) {
+    let (fam, ty, bytes) = ip_attr(addr);
+    let mut b = Builder::new(out, IPSET_CMD_TEST, NLM_F_REQUEST | NLM_F_ACK, seq, fam);
     b.attr_u8(IPSET_ATTR_PROTOCOL, proto)
         .attr_str(IPSET_ATTR_SETNAME, set)
         .nest(IPSET_ATTR_DATA)
@@ -246,8 +273,8 @@ pub fn msg_test(seq: u32, proto: u8, set: &[u8], addr: &crate::proto::Addr) -> V
 }
 
 /// nft set: flags, key type and length, default timeout in ms.
-pub fn msg_nft_getset(seq: u32, family: u8, table: &[u8], set: &[u8]) -> Vec<u8> {
-    let mut b = Builder::nft(NFT_MSG_GETSET, NLM_F_REQUEST | NLM_F_ACK, seq, family);
+pub fn msg_nft_getset(out: &mut Vec<u8>, seq: u32, family: u8, table: &[u8], set: &[u8]) {
+    let mut b = Builder::nft(out, NFT_MSG_GETSET, NLM_F_REQUEST | NLM_F_ACK, seq, family);
     b.attr_str(NFTA_SET_TABLE, table)
         .attr_str(NFTA_SET_NAME, set);
     b.finish()
@@ -269,8 +296,14 @@ fn nft_elem(b: &mut Builder, table: &[u8], set: &[u8], key: &[u8], timeout_ms: O
 
 /// Element lookup: data and ACK 0 if present; -ENOENT if absent, and also
 /// if the set or table is missing. Interval sets match a containing range.
-pub fn msg_nft_get(seq: u32, family: u8, table: &[u8], set: &[u8], key: &[u8]) -> Vec<u8> {
-    let mut b = Builder::nft(NFT_MSG_GETSETELEM, NLM_F_REQUEST | NLM_F_ACK, seq, family);
+pub fn msg_nft_get(out: &mut Vec<u8>, seq: u32, family: u8, table: &[u8], set: &[u8], key: &[u8]) {
+    let mut b = Builder::nft(
+        out,
+        NFT_MSG_GETSETELEM,
+        NLM_F_REQUEST | NLM_F_ACK,
+        seq,
+        family,
+    );
     nft_elem(&mut b, table, set, key, None);
     b.finish()
 }
@@ -278,38 +311,41 @@ pub fn msg_nft_get(seq: u32, family: u8, table: &[u8], set: &[u8], key: &[u8]) -
 /// Element add in a batch of its own; only `seq` is acknowledged. EXCL: an
 /// existing element keeps its timeout (-EEXIST).
 pub fn msg_nft_add(
+    out: &mut Vec<u8>,
     seq: u32,
     family: u8,
     table: &[u8],
     set: &[u8],
     key: &[u8],
     timeout_ms: u64,
-) -> Vec<u8> {
-    let begin = Builder::raw(
+) {
+    Builder::raw(
+        out,
         NFNL_MSG_BATCH_BEGIN,
         NLM_F_REQUEST,
         seq.wrapping_sub(1),
         0,
         NFNL_SUBSYS_NFTABLES,
-    );
+    )
+    .finish();
     let mut b = Builder::nft(
+        out,
         NFT_MSG_NEWSETELEM,
         NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
         seq,
         family,
     );
     nft_elem(&mut b, table, set, key, Some(timeout_ms));
-    let end = Builder::raw(
+    b.finish();
+    Builder::raw(
+        out,
         NFNL_MSG_BATCH_END,
         NLM_F_REQUEST,
         seq.wrapping_add(1),
         0,
         NFNL_SUBSYS_NFTABLES,
-    );
-    let mut v = begin.finish();
-    v.extend(b.finish());
-    v.extend(end.finish());
-    v
+    )
+    .finish();
 }
 
 #[derive(Debug)]
@@ -328,8 +364,15 @@ pub enum Reply<'a> {
     },
 }
 
+#[cfg(test)]
 pub fn parse(buf: &[u8]) -> Result<Vec<Reply<'_>>, &'static str> {
     let mut out = Vec::new();
+    parse_each(buf, |r| out.push(r))?;
+    Ok(out)
+}
+
+/// Calls `f` for each message in `buf`, up to the first malformed one.
+pub fn parse_each<'a>(buf: &'a [u8], mut f: impl FnMut(Reply<'a>)) -> Result<(), &'static str> {
     let mut off = 0usize;
     while off < buf.len() {
         let rest = &buf[off..];
@@ -349,14 +392,14 @@ pub fn parse(buf: &[u8]) -> Result<Vec<Reply<'_>>, &'static str> {
                     return Err("short nlmsgerr");
                 }
                 let errno = i32::from_ne_bytes([body[0], body[1], body[2], body[3]]);
-                out.push(Reply::Ack { seq, errno });
+                f(Reply::Ack { seq, errno });
             }
-            NLMSG_DONE => out.push(Reply::Done { seq }),
+            NLMSG_DONE => f(Reply::Done { seq }),
             t if t >> 8 == NFNL_SUBSYS_IPSET || t >> 8 == NFNL_SUBSYS_NFTABLES => {
                 if body.len() < NFGEN_HDRLEN {
                     return Err("short nfgenmsg");
                 }
-                out.push(Reply::Data {
+                f(Reply::Data {
                     subsys: t >> 8,
                     cmd: t & 0xff,
                     attrs: &body[NFGEN_HDRLEN..],
@@ -366,7 +409,7 @@ pub fn parse(buf: &[u8]) -> Result<Vec<Reply<'_>>, &'static str> {
         }
         off += align4(len).min(rest.len());
     }
-    Ok(out)
+    Ok(())
 }
 
 pub fn attrs(mut b: &[u8]) -> impl Iterator<Item = Result<(u16, &[u8]), &'static str>> {
@@ -399,7 +442,8 @@ mod tests {
     #[test]
     fn fuzz_parse() {
         let mut rng = Rng::new(0x6e6c);
-        let seed = msg_test(1, 7, b"set", &Addr::V6([1; 16]));
+        let mut seed = Vec::new();
+        msg_test(&mut seed, 1, 7, b"set", &Addr::V6([1; 16]));
         for _ in 0..200_000 {
             let input = rng.input(&seed, 96);
             if let Ok(msgs) = parse(&input) {
@@ -419,7 +463,8 @@ mod tests {
 
     #[test]
     fn test_msg_layout() {
-        let m = msg_test(9, 7, b"bad", &Addr::V4([192, 0, 2, 1]));
+        let mut m = Vec::new();
+        msg_test(&mut m, 9, 7, b"bad", &Addr::V4([192, 0, 2, 1]));
         assert_eq!(m.len() % 4, 0);
         assert_eq!(
             u32::from_ne_bytes([m[0], m[1], m[2], m[3]]) as usize,
@@ -432,7 +477,8 @@ mod tests {
 
     #[test]
     fn add_msg_layout() {
-        let m = msg_add(3, 7, b"ban", &Addr::V4([192, 0, 2, 1]), None, 3600);
+        let mut m = Vec::new();
+        msg_add(&mut m, 3, 7, b"ban", &Addr::V4([192, 0, 2, 1]), None, 3600);
         assert_eq!(
             u16::from_ne_bytes([m[6], m[7]]),
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL
@@ -440,13 +486,47 @@ mod tests {
         // timeout is the last attribute: be32 with NLA_F_NET_BYTEORDER
         assert_eq!(&m[m.len() - 8..m.len() - 4], &[8, 0, 6, 0x40]);
         assert_eq!(&m[m.len() - 4..], &3600u32.to_be_bytes());
-        let n = msg_add(3, 7, b"ban", &Addr::V4([192, 0, 2, 1]), Some(24), 60);
+        let mut n = Vec::new();
+        msg_add(
+            &mut n,
+            3,
+            7,
+            b"ban",
+            &Addr::V4([192, 0, 2, 1]),
+            Some(24),
+            60,
+        );
         assert_eq!(n.len(), m.len() + 8);
     }
 
     #[test]
+    fn batch_in_one_buffer() {
+        let mut b = Vec::new();
+        for seq in 40..45 {
+            msg_test(&mut b, seq, 7, b"s", &Addr::V4([192, 0, 2, seq as u8]));
+        }
+        msg_nft_get(&mut b, 45, 1, b"filter", b"ban", &[2u8; 16]);
+        let mut off = 0;
+        let mut seqs = Vec::new();
+        while off < b.len() {
+            let len = u32::from_ne_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]) as usize;
+            assert_eq!(len % 4, 0);
+            seqs.push(u32::from_ne_bytes([
+                b[off + 8],
+                b[off + 9],
+                b[off + 10],
+                b[off + 11],
+            ]));
+            off += len;
+        }
+        assert_eq!(off, b.len());
+        assert_eq!(seqs, (40..46).collect::<Vec<u32>>());
+    }
+
+    #[test]
     fn nft_add_layout() {
-        let m = msg_nft_add(10, 1, b"filter", b"ban", &[192, 0, 2, 1], 60_000);
+        let mut m = Vec::new();
+        msg_nft_add(&mut m, 10, 1, b"filter", b"ban", &[192, 0, 2, 1], 60_000);
         let msgs: Vec<(u16, u16, u32)> = {
             let mut v = Vec::new();
             let mut off = 0;
@@ -471,8 +551,7 @@ mod tests {
         assert_eq!(msgs[2], (0x11, NLM_F_REQUEST, 11));
         // batch begin: res_id NFNL_SUBSYS_NFTABLES, big-endian
         assert_eq!(&m[18..20], &[0, 10]);
-        let b = msg_nft_add(10, 1, b"filter", b"ban", &[192, 0, 2, 1], 60_000);
-        assert!(b.windows(8).any(|w| w == 60_000u64.to_be_bytes()));
+        assert!(m.windows(8).any(|w| w == 60_000u64.to_be_bytes()));
     }
 
     #[test]

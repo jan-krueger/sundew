@@ -364,7 +364,64 @@ pub fn netlink_socket() -> io::Result<i32> {
             libc::setsockopt(fd, libc::SOL_NETLINK, opt, &one as *const _ as *const _, 4);
         }
     }
+    // a batch of replies must fit: the kernel drops what does not
+    let rcvbuf: libc::c_int = NETLINK_RCVBUF;
+    for opt in [libc::SO_RCVBUFFORCE, libc::SO_RCVBUF] {
+        // SAFETY: int option.
+        let r = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                opt,
+                &rcvbuf as *const _ as *const _,
+                4,
+            )
+        };
+        if r == 0 {
+            break;
+        }
+    }
     Ok(fd)
+}
+
+pub const NETLINK_RCVBUF: libc::c_int = 4 << 20;
+
+/// Datagrams into consecutive `chunk`-sized pieces of `buf`, without
+/// waiting: (count, lens and msg_flags in `out`).
+pub fn recv_many(
+    fd: i32,
+    buf: &mut [u8],
+    chunk: usize,
+    out: &mut [(usize, i32)],
+) -> io::Result<usize> {
+    const MAX: usize = 64;
+    let n = (buf.len() / chunk).min(out.len()).min(MAX);
+    // SAFETY: zeroed iovec and mmsghdr are valid.
+    let mut iov: [libc::iovec; MAX] = unsafe { std::mem::zeroed() };
+    let mut hdr: [libc::mmsghdr; MAX] = unsafe { std::mem::zeroed() };
+    for i in 0..n {
+        iov[i].iov_base = buf[i * chunk..].as_mut_ptr() as *mut _;
+        iov[i].iov_len = chunk;
+        hdr[i].msg_hdr.msg_iov = &mut iov[i];
+        hdr[i].msg_hdr.msg_iovlen = 1;
+    }
+    // SAFETY: n headers pointing into buf.
+    let r = unsafe {
+        libc::recvmmsg(
+            fd,
+            hdr.as_mut_ptr(),
+            n as libc::c_uint,
+            libc::MSG_DONTWAIT as _, // c_int on glibc, c_uint on musl
+            std::ptr::null_mut(),
+        )
+    };
+    if r == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    for i in 0..r as usize {
+        out[i] = (hdr[i].msg_len as usize, hdr[i].msg_hdr.msg_flags);
+    }
+    Ok(r as usize)
 }
 
 pub fn send(fd: i32, b: &[u8]) -> io::Result<usize> {
@@ -412,6 +469,81 @@ pub fn recv(fd: i32, buf: &mut [u8]) -> io::Result<(usize, i32)> {
         flags |= libc::MSG_CTRUNC;
     }
     Ok((n as usize, flags))
+}
+
+/// Frames from a worker, up to `out.len()`, without waiting. A frame that
+/// came with ancillary data (e.g. a file descriptor) reports MSG_CTRUNC.
+pub fn recv_frames(
+    fd: i32,
+    buf: &mut [u8],
+    frame: usize,
+    out: &mut [(usize, i32)],
+) -> io::Result<usize> {
+    const MAX: usize = 64;
+    const CMSG: usize = 64;
+    let n = (buf.len() / frame).min(out.len()).min(MAX);
+    let mut cmsg = [0u8; MAX * CMSG];
+    // SAFETY: zeroed iovec and mmsghdr are valid.
+    let mut iov: [libc::iovec; MAX] = unsafe { std::mem::zeroed() };
+    let mut hdr: [libc::mmsghdr; MAX] = unsafe { std::mem::zeroed() };
+    for i in 0..n {
+        iov[i].iov_base = buf[i * frame..].as_mut_ptr() as *mut _;
+        iov[i].iov_len = frame;
+        hdr[i].msg_hdr.msg_iov = &mut iov[i];
+        hdr[i].msg_hdr.msg_iovlen = 1;
+        hdr[i].msg_hdr.msg_control = cmsg[i * CMSG..].as_mut_ptr() as *mut _;
+        hdr[i].msg_hdr.msg_controllen = CMSG as _;
+    }
+    // SAFETY: n headers pointing into buf and cmsg.
+    let r = unsafe {
+        libc::recvmmsg(
+            fd,
+            hdr.as_mut_ptr(),
+            n as libc::c_uint,
+            (libc::MSG_DONTWAIT | libc::MSG_CMSG_CLOEXEC) as _,
+            std::ptr::null_mut(),
+        )
+    };
+    if r == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    for i in 0..r as usize {
+        let mut flags = hdr[i].msg_hdr.msg_flags;
+        if hdr[i].msg_hdr.msg_controllen != 0 {
+            flags |= libc::MSG_CTRUNC;
+        }
+        out[i] = (hdr[i].msg_len as usize, flags);
+    }
+    Ok(r as usize)
+}
+
+/// Sends frames to one fd in one call: how many went out.
+pub fn send_frames(fd: i32, frames: &[[u8; crate::proto::REP_LEN]]) -> io::Result<usize> {
+    const MAX: usize = 64;
+    let n = frames.len().min(MAX);
+    // SAFETY: zeroed iovec and mmsghdr are valid.
+    let mut iov: [libc::iovec; MAX] = unsafe { std::mem::zeroed() };
+    let mut hdr: [libc::mmsghdr; MAX] = unsafe { std::mem::zeroed() };
+    for i in 0..n {
+        iov[i].iov_base = frames[i].as_ptr() as *mut _;
+        iov[i].iov_len = frames[i].len();
+        hdr[i].msg_hdr.msg_iov = &mut iov[i];
+        hdr[i].msg_hdr.msg_iovlen = 1;
+    }
+    // SAFETY: n headers pointing into frames, which sendmmsg only reads.
+    let r = unsafe {
+        libc::sendmmsg(
+            fd,
+            hdr.as_mut_ptr(),
+            n as libc::c_uint,
+            (libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL) as _,
+        )
+    };
+    if r == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(r as usize)
+    }
 }
 
 /// Sends to the first fd in [first, first + n) that accepts it.

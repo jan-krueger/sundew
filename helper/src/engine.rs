@@ -56,10 +56,31 @@ struct Engine {
     protect: Vec<proto::Cidr>,
     recent: std::collections::HashMap<(usize, [u8; 16]), u64>,
     draining: bool,
+    /// requests to the kernel, built in place
+    wbuf: Vec<u8>,
+    /// replies from the kernel, RCHUNK bytes each
     rbuf: Vec<u8>,
+    rlens: [(usize, i32); RCHUNKS],
+    /// errno per message of the last transact
+    res: Vec<i32>,
+}
+
+/// A TEST from a worker, waiting for the next batch.
+struct Lookup {
+    fd: i32,
+    req_id: u32,
+    mask: u64,
+    addr: Addr,
 }
 
 const NL_TIMEOUT_MS: i32 = 1000;
+const RCHUNK: usize = 8192;
+const RCHUNKS: usize = 32;
+const PENDING: i32 = i32::MIN;
+/// netlink messages per batch; their replies fit sys::NETLINK_RCVBUF
+const MAX_BATCH_MSGS: usize = 512;
+/// receive slot per worker frame; larger frames are violations
+const FRAME_SLOT: usize = 64;
 const RECENT_MS: u64 = 10_000;
 const BREAKER_PER_MINUTE: u32 = 1000;
 const BREAKER_PAUSE_MS: u64 = 600_000;
@@ -110,69 +131,88 @@ impl Engine {
         self.seq
     }
 
-    /// Errno per message, or the errno of the failure. A message completes
-    /// with its ACK, or with DONE for dumps.
+    /// Sends the messages in `buf`, with sequence numbers `first`..`first + n`,
+    /// at once. Errno per message lands in `self.res`. A message completes with
+    /// its ACK, or with DONE for dumps.
     fn transact(
         &mut self,
-        msgs: &[(u32, Vec<u8>)],
+        buf: &[u8],
+        first: u32,
+        n: usize,
         mut on_data: impl FnMut(u16, u16, &[u8]),
-    ) -> Result<Vec<i32>, i32> {
+    ) -> Result<(), i32> {
         let errno = |e: std::io::Error| e.raw_os_error().unwrap_or(libc::EIO);
-        for (_, m) in msgs {
-            if sys::send(self.nl, m).map_err(errno)? != m.len() {
-                return Err(libc::EMSGSIZE);
-            }
+        self.res.clear();
+        self.res.resize(n, PENDING);
+        if sys::send(self.nl, buf).map_err(errno)? != buf.len() {
+            return Err(libc::EMSGSIZE);
         }
-        let mut res: Vec<Option<i32>> = vec![None; msgs.len()];
-        let mut left = msgs.len();
+        let mut left = n;
         while left > 0 {
-            if !sys::poll_in(self.nl, NL_TIMEOUT_MS).map_err(errno)? {
-                log!("netlink timeout");
-                return Err(libc::ETIMEDOUT);
-            }
-            let (n, flags) = match sys::recv(self.nl, &mut self.rbuf) {
-                Ok(x) => x,
-                Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => continue,
+            // replies to most requests are queued before send() returns
+            let k = match sys::recv_many(self.nl, &mut self.rbuf, RCHUNK, &mut self.rlens) {
+                Ok(k) => k,
+                Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => {
+                    if !sys::poll_in(self.nl, NL_TIMEOUT_MS).map_err(errno)? {
+                        log!("netlink timeout");
+                        return Err(libc::ETIMEDOUT);
+                    }
+                    continue;
+                }
                 Err(e) => {
                     log!("netlink recv: {e}");
                     return Err(errno(e));
                 }
             };
-            if flags & libc::MSG_TRUNC != 0 || n > self.rbuf.len() {
-                log!("netlink reply truncated");
-                return Err(libc::EMSGSIZE);
-            }
-            let replies = match nl::parse(&self.rbuf[..n]) {
-                Ok(r) => r,
-                Err(e) => {
+            for i in 0..k {
+                let (len, flags) = self.rlens[i];
+                if flags & libc::MSG_TRUNC != 0 || len > RCHUNK {
+                    log!("netlink reply truncated");
+                    return Err(libc::EMSGSIZE);
+                }
+                let res = &mut self.res;
+                let r = nl::parse_each(&self.rbuf[i * RCHUNK..i * RCHUNK + len], |r| {
+                    let (seq, code) = match r {
+                        Reply::Ack { seq, errno } => (seq, errno),
+                        Reply::Done { seq } => (seq, 0),
+                        Reply::Data { subsys, cmd, attrs } => {
+                            on_data(subsys, cmd, attrs);
+                            return;
+                        }
+                    };
+                    let i = seq.wrapping_sub(first) as usize;
+                    if i < n && res[i] == PENDING {
+                        res[i] = code;
+                        left -= 1;
+                    }
+                });
+                if let Err(e) = r {
                     log!("netlink parse: {e}");
                     return Err(libc::EPROTO);
                 }
-            };
-            for r in replies {
-                let (seq, code) = match r {
-                    Reply::Ack { seq, errno } => (seq, errno),
-                    Reply::Done { seq } => (seq, 0),
-                    Reply::Data { subsys, cmd, attrs } => {
-                        on_data(subsys, cmd, attrs);
-                        continue;
-                    }
-                };
-                if let Some(i) = msgs.iter().position(|(s, _)| *s == seq) {
-                    if res[i].is_none() {
-                        res[i] = Some(code);
-                        left -= 1;
-                    }
-                }
             }
         }
-        Ok(res.into_iter().map(|r| r.unwrap_or(-libc::EIO)).collect())
+        Ok(())
+    }
+
+    /// One request message, built by `build` into the reused buffer.
+    fn transact_one(
+        &mut self,
+        build: impl FnOnce(&mut Vec<u8>, u32),
+        on_data: impl FnMut(u16, u16, &[u8]),
+    ) -> Result<i32, i32> {
+        let seq = self.next_seq();
+        let mut buf = std::mem::take(&mut self.wbuf);
+        buf.clear();
+        build(&mut buf, seq);
+        let r = self.transact(&buf, seq, 1, on_data);
+        self.wbuf = buf;
+        r.map(|()| self.res[0])
     }
 
     fn negotiate(&mut self) -> (u8, u8) {
-        let seq = self.next_seq();
         let (mut kmin, mut kmax) = (0u8, 0u8);
-        let r = self.transact(&[(seq, nl::msg_protocol(seq))], |sub, cmd, attrs| {
+        let r = self.transact_one(nl::msg_protocol, |sub, cmd, attrs| {
             if sub != nl::NFNL_SUBSYS_IPSET || cmd != nl::IPSET_CMD_PROTOCOL {
                 return;
             }
@@ -185,10 +225,10 @@ impl Engine {
             }
         });
         match r {
-            Ok(v) if v[0] == 0 && kmax >= nl::IPSET_PROTOCOL_MIN => {}
+            Ok(0) if kmax >= nl::IPSET_PROTOCOL_MIN => {}
             Ok(v) => fail(
                 proto::ERR_KPROTO,
-                &format!("ipset protocol query failed ({})", v[0]),
+                &format!("ipset protocol query failed ({v})"),
                 None,
             ),
             Err(_) => fail(proto::ERR_NETLINK, "ipset protocol query failed", None),
@@ -201,11 +241,11 @@ impl Engine {
 
     /// Type, family and create options of one set (header-only LIST).
     fn describe(&mut self, name: &[u8]) -> (ReadySet, Option<SetType>) {
-        let seq = self.next_seq();
         let mut rs = ReadySet::default();
         let mut messages = 0;
-        let msg = nl::msg_list_header(seq, self.proto, name);
-        let r = self.transact(&[(seq, msg)], |sub, cmd, attrs| {
+        let proto = self.proto;
+        let build = |b: &mut Vec<u8>, seq| nl::msg_list_header(b, seq, proto, name);
+        let r = self.transact_one(build, |sub, cmd, attrs| {
             if sub != nl::NFNL_SUBSYS_IPSET || cmd != nl::IPSET_CMD_LIST {
                 return;
             }
@@ -235,10 +275,7 @@ impl Engine {
                 }
             }
         });
-        rs.err = match r {
-            Ok(v) => v[0],
-            Err(e) => -e,
-        };
+        rs.err = r.unwrap_or_else(|e| -e);
         if rs.err == 0 && messages != 1 {
             rs.err = -libc::EPROTO;
         }
@@ -265,12 +302,11 @@ impl Engine {
         name: &[u8],
         role: u8,
     ) -> (ReadySet, bool) {
-        let seq = self.next_seq();
         let (mut flags, mut ktype, mut klen, mut map, mut timeout_ms, mut messages) =
             (0u32, 0u32, 0u32, false, 0u64, 0);
-        let msg = nl::msg_nft_getset(seq, family, table, name);
+        let build = |b: &mut Vec<u8>, seq| nl::msg_nft_getset(b, seq, family, table, name);
         let be32 = |v: &[u8]| v.try_into().map(u32::from_be_bytes).unwrap_or(u32::MAX);
-        let r = self.transact(&[(seq, msg)], |sub, cmd, attrs| {
+        let r = self.transact_one(build, |sub, cmd, attrs| {
             if sub != nl::NFNL_SUBSYS_NFTABLES || cmd != nl::NFT_MSG_NEWSET {
                 return;
             }
@@ -289,10 +325,7 @@ impl Engine {
             }
         });
         let mut rs = ReadySet {
-            err: match r {
-                Ok(v) => v[0],
-                Err(e) => -e,
-            },
+            err: r.unwrap_or_else(|e| -e),
             ..ReadySet::default()
         };
         if rs.err == 0 && messages != 1 {
@@ -323,65 +356,96 @@ impl Engine {
         (rs, interval)
     }
 
-    /// (status, decided, matched); problems are logged to `fd`.
-    fn test(&mut self, fd: i32, mask: u64, addr: &Addr) -> (u8, u64, u64) {
-        let mut msgs = Vec::new();
-        let mut idx = Vec::new();
-        for i in 0..self.sets.len() {
-            if mask & (1u64 << i) != 0 {
+    /// Answers `lookups` with one netlink round trip; replies go to `out`.
+    fn lookup_batch(&mut self, lookups: &[Lookup], out: &mut Vec<(i32, [u8; proto::REP_LEN])>) {
+        let total: u64 = lookups.iter().map(|l| l.mask.count_ones() as u64).sum();
+        if self.seq as u64 + total >= u32::MAX as u64 {
+            // consecutive numbers for the whole batch
+            self.seq = 0;
+        }
+        let first = self.seq + 1;
+        let mut buf = std::mem::take(&mut self.wbuf);
+        buf.clear();
+        let mut n = 0;
+        for l in lookups {
+            for i in 0..self.sets.len() {
+                if l.mask & (1u64 << i) == 0 {
+                    continue;
+                }
                 let seq = self.next_seq();
                 let set = &self.sets[i];
-                let m = match &set.backend {
-                    Backend::Ipset { .. } => nl::msg_test(seq, self.proto, &set.name, addr),
-                    Backend::Nft { family, table, .. } => {
-                        nl::msg_nft_get(seq, *family, table, &set.name, addr_slice(addr))
+                match &set.backend {
+                    Backend::Ipset { .. } => {
+                        nl::msg_test(&mut buf, seq, self.proto, &set.name, &l.addr)
                     }
-                };
-                msgs.push((seq, m));
-                idx.push(i);
+                    Backend::Nft { family, table, .. } => nl::msg_nft_get(
+                        &mut buf,
+                        seq,
+                        *family,
+                        table,
+                        &set.name,
+                        addr_slice(&l.addr),
+                    ),
+                }
+                n += 1;
             }
         }
-        let res = match self.transact(&msgs, |_, _, _| {}) {
-            Ok(r) => r,
-            Err(errno) => {
-                self.log(fd, proto::LVL_ERR, proto::LOG_NETLINK, errno as u64);
-                return (proto::ST_ERROR, 0, 0);
+        let r = self.transact(&buf, first, n, |_, _, _| {});
+        self.wbuf = buf;
+        if let Err(errno) = r {
+            for l in lookups {
+                self.log(l.fd, proto::LVL_ERR, proto::LOG_NETLINK, errno as u64);
+                out.push((l.fd, proto::encode_rep(proto::ST_ERROR, l.req_id, 0, 0)));
             }
-        };
-        let (mut decided, mut matched) = (0u64, 0u64);
+            return;
+        }
+        let res = std::mem::take(&mut self.res);
         let now = sys::monotonic_ms();
-        for (k, errno) in res.into_iter().enumerate() {
-            let b = 1u64 << idx[k];
-            let nft = match self.sets[idx[k]].backend {
-                Backend::Nft { checked_ms, .. } => Some(checked_ms),
-                Backend::Ipset { .. } => None,
-            };
-            match errno {
-                0 => {
-                    decided |= b;
-                    matched |= b;
+        let mut k = 0;
+        for l in lookups {
+            let (mut decided, mut matched) = (0u64, 0u64);
+            for i in 0..self.sets.len() {
+                if l.mask & (1u64 << i) == 0 {
+                    continue;
                 }
-                e if nft.is_none() && e == -nl::IPSET_ERR_EXIST => decided |= b,
-                e if e == -libc::ENOENT
-                    && nft.is_some_and(|t| now.saturating_sub(t) < NFT_RECHECK_MS) =>
-                {
-                    decided |= b
+                let errno = res[k];
+                k += 1;
+                let b = 1u64 << i;
+                let nft = match self.sets[i].backend {
+                    Backend::Nft { checked_ms, .. } => Some(checked_ms),
+                    Backend::Ipset { .. } => None,
+                };
+                match errno {
+                    0 => {
+                        decided |= b;
+                        matched |= b;
+                    }
+                    e if nft.is_none() && e == -nl::IPSET_ERR_EXIST => decided |= b,
+                    e if e == -libc::ENOENT
+                        && nft.is_some_and(|t| now.saturating_sub(t) < NFT_RECHECK_MS) =>
+                    {
+                        decided |= b
+                    }
+                    e if e == -libc::ENOENT && nft.is_some() && self.nft_exists(i, now) => {
+                        decided |= b
+                    }
+                    e if e == -libc::ENOENT => {
+                        self.log(l.fd, proto::LVL_ERR, proto::LOG_SET_MISSING, i as u64)
+                    }
+                    e => self.log(
+                        l.fd,
+                        proto::LVL_ERR,
+                        proto::LOG_TEST_FAILED,
+                        i as u64 | ((-e) as u32 as u64) << 32,
+                    ),
                 }
-                e if e == -libc::ENOENT && nft.is_some() && self.nft_exists(idx[k], now) => {
-                    decided |= b
-                }
-                e if e == -libc::ENOENT => {
-                    self.log(fd, proto::LVL_ERR, proto::LOG_SET_MISSING, idx[k] as u64)
-                }
-                e => self.log(
-                    fd,
-                    proto::LVL_ERR,
-                    proto::LOG_TEST_FAILED,
-                    idx[k] as u64 | ((-e) as u32 as u64) << 32,
-                ),
             }
+            out.push((
+                l.fd,
+                proto::encode_rep(proto::ST_OK, l.req_id, decided, matched),
+            ));
         }
-        (proto::ST_OK, decided, matched)
+        self.res = res;
     }
 
     /// Re-check after -ENOENT that an nft set still exists and fits.
@@ -500,28 +564,36 @@ impl Engine {
         } else {
             Addr::V4([elem[0], elem[1], elem[2], elem[3]])
         };
+        let nft = matches!(self.sets[set_idx].backend, Backend::Nft { .. });
+        if nft {
+            // the batch around the add takes the numbers either side
+            self.next_seq();
+        }
         let seq = self.next_seq();
+        if nft {
+            self.next_seq();
+        }
+        let mut buf = std::mem::take(&mut self.wbuf);
+        buf.clear();
         let set = &self.sets[set_idx];
-        let nft = matches!(set.backend, Backend::Nft { .. });
-        let msg = match &set.backend {
+        match &set.backend {
             Backend::Ipset { .. } => {
-                nl::msg_add(seq, self.proto, &set.name, &target, cidr, timeout)
+                nl::msg_add(&mut buf, seq, self.proto, &set.name, &target, cidr, timeout)
             }
-            Backend::Nft { family, table, .. } => {
-                // the batch around it takes the sequence numbers either side
-                self.seq = self.seq.wrapping_add(1);
-                nl::msg_nft_add(
-                    seq,
-                    *family,
-                    table,
-                    &set.name,
-                    addr_slice(&target),
-                    timeout as u64 * 1000,
-                )
-            }
-        };
-        let res = match self.transact(&[(seq, msg)], |_, _, _| {}) {
-            Ok(v) => v[0],
+            Backend::Nft { family, table, .. } => nl::msg_nft_add(
+                &mut buf,
+                seq,
+                *family,
+                table,
+                &set.name,
+                addr_slice(&target),
+                timeout as u64 * 1000,
+            ),
+        }
+        let sent = self.transact(&buf, seq, 1, |_, _, _| {});
+        self.wbuf = buf;
+        let res = match sent {
+            Ok(()) => self.res[0],
             Err(errno) => {
                 self.log(fd, proto::LVL_ERR, proto::LOG_NETLINK, errno as u64);
                 return (proto::ST_ERROR, 0);
@@ -609,6 +681,8 @@ fn harden() -> Option<i32> {
         libc::SYS_sendmsg,
         libc::SYS_recvfrom,
         libc::SYS_recvmsg,
+        libc::SYS_recvmmsg,
+        libc::SYS_sendmmsg,
         libc::SYS_epoll_pwait,
         libc::SYS_epoll_ctl,
         libc::SYS_ppoll,
@@ -690,7 +764,10 @@ pub fn run(restarted: bool) -> ! {
         protect: policy.protect.clone(),
         recent: std::collections::HashMap::new(),
         draining: false,
-        rbuf: vec![0u8; 65536],
+        wbuf: Vec::with_capacity(MAX_BATCH_MSGS * 80),
+        rbuf: vec![0u8; RCHUNK * RCHUNKS],
+        rlens: [(0, 0); RCHUNKS],
+        res: Vec::with_capacity(MAX_BATCH_MSGS),
     };
     // nft-only configurations work without the ip_set module
     let (kmin, kmax) = if policy
@@ -797,9 +874,15 @@ pub fn run(restarted: bool) -> ! {
         std::collections::VecDeque::new();
 
     let mut ctl_open = true;
+    let mut lookups: Vec<Lookup> = Vec::with_capacity(256);
+    let mut replies: Vec<(i32, [u8; proto::REP_LEN])> = Vec::with_capacity(256);
+    let mut closed: Vec<i32> = Vec::new();
     let mut deadline: Option<u64> = None;
     let mut evs = [libc::epoll_event { events: 0, u64: 0 }; 32];
     let mut fbuf = [0u8; 256];
+    let mut frames = [0u8; FRAME_SLOT * 64];
+    let mut flens = [(0usize, 0i32); 64];
+    let mut out = [[0u8; proto::REP_LEN]; 64];
 
     loop {
         let now = sys::monotonic_ms();
@@ -830,6 +913,11 @@ pub fn run(restarted: bool) -> ! {
             Err(_) => sys::exit(1),
         };
 
+        lookups.clear();
+        replies.clear();
+        closed.clear();
+        let mut batch_msgs = 0usize;
+
         for ev in &evs[..n] {
             let fd = ev.u64 as i32;
 
@@ -854,69 +942,120 @@ pub fn run(restarted: bool) -> ! {
                 continue;
             }
 
-            for _ in 0..64 {
-                let violation = |reason: u64| Some(reason);
-                let close_slot: Option<Option<u64>> = match sys::recv(fd, &mut fbuf) {
-                    Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => break,
-                    Err(_) | Ok((0, _)) => Some(None),
-                    Ok((len, flags)) => {
+            // up to 64 frames per worker and pass, as before
+            let got = match sys::recv_frames(fd, &mut frames, FRAME_SLOT, &mut flens) {
+                Ok(k) => k,
+                Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => continue,
+                Err(_) => 0,
+            };
+            for i in 0..got.max(1) {
+                let (len, flags) = if got == 0 { (0, 0) } else { flens[i] };
+                let fbuf = &frames[i * FRAME_SLOT..i * FRAME_SLOT + len.min(FRAME_SLOT)];
+                let close: Option<Option<u64>> = match (len, flags) {
+                    (0, _) => Some(None),
+                    (len, flags)
                         if flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0
-                            || len != proto::REQ_LEN
-                        {
-                            Some(violation(proto::VIOLATION_SIZE))
-                        } else {
-                            match proto::decode_req(&fbuf[..len]) {
-                                Ok(req)
-                                    if (req.op == proto::OP_TEST
-                                        && eng.mask_valid(req.arg, &req.addr))
-                                        || (req.op == proto::OP_ADD
-                                            && eng.rule_valid(req.arg, &req.addr)) =>
-                                {
-                                    let rep = if req.op == proto::OP_TEST {
-                                        let (st, d, m) = eng.test(fd, req.arg, &req.addr);
-                                        proto::encode_rep(st, req.req_id, d, m)
-                                    } else {
-                                        let (st, d) = eng.add(fd, req.arg as usize, &req.addr);
-                                        proto::encode_rep(st, req.req_id, d, 0)
-                                    };
-                                    if delay > 0 {
-                                        delayed.push_back((sys::monotonic_ms() + delay, fd, rep));
-                                        continue;
-                                    }
-                                    match sys::send(fd, &rep) {
-                                        Ok(_) => None,
-                                        Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => None,
-                                        Err(_) => Some(None),
-                                    }
-                                }
-                                Ok(_) => Some(violation(proto::VIOLATION_MASK)),
-                                Err(_) => Some(violation(proto::VIOLATION_FRAME)),
-                            }
-                        }
+                            || len != proto::REQ_LEN =>
+                    {
+                        Some(Some(proto::VIOLATION_SIZE))
                     }
+                    _ => match proto::decode_req(fbuf) {
+                        Ok(req)
+                            if req.op == proto::OP_TEST && eng.mask_valid(req.arg, &req.addr) =>
+                        {
+                            let k = req.arg.count_ones() as usize;
+                            if batch_msgs + k > MAX_BATCH_MSGS && !lookups.is_empty() {
+                                eng.lookup_batch(&lookups, &mut replies);
+                                lookups.clear();
+                                batch_msgs = 0;
+                            }
+                            lookups.push(Lookup {
+                                fd,
+                                req_id: req.req_id,
+                                mask: req.arg,
+                                addr: req.addr,
+                            });
+                            batch_msgs += k;
+                            None
+                        }
+                        Ok(req)
+                            if req.op == proto::OP_ADD && eng.rule_valid(req.arg, &req.addr) =>
+                        {
+                            let (st, d) = eng.add(fd, req.arg as usize, &req.addr);
+                            replies.push((fd, proto::encode_rep(st, req.req_id, d, 0)));
+                            None
+                        }
+                        Ok(_) => Some(Some(proto::VIOLATION_MASK)),
+                        Err(_) => Some(Some(proto::VIOLATION_FRAME)),
+                    },
                 };
 
-                if let Some(reason) = close_slot {
-                    if let Some(reason) = reason {
-                        log!("protocol violation on fd {fd} ({reason})");
-                        let _ = sys::send(
-                            fd,
-                            &proto::encode_log(proto::LVL_ALERT, proto::LOG_VIOLATION, reason),
-                        );
-                    }
-                    sys::epoll_del(ep, fd);
-                    sys::shutdown(fd); // the keeper holds a duplicate
-                    sys::close(fd);
+                if let Some(reason) = close {
+                    close_slot(ep, fd, reason);
+                    closed.push(fd);
                     open_slots -= 1;
+                    // nothing more goes to this descriptor number
+                    lookups.retain(|l| l.fd != fd);
+                    replies.retain(|r| r.0 != fd);
+                    batch_msgs = lookups.iter().map(|l| l.mask.count_ones() as usize).sum();
                     break;
                 }
             }
+        }
 
-            if open_slots == 0 {
-                sys::exit(0);
+        if !lookups.is_empty() {
+            eng.lookup_batch(&lookups, &mut replies);
+        }
+
+        // one call per worker
+        replies.sort_by_key(|r| r.0);
+        let mut i = 0;
+        while i < replies.len() {
+            let fd = replies[i].0;
+            let mut j = i;
+            while j < replies.len() && replies[j].0 == fd && j - i < 64 {
+                out[j - i] = replies[j].1;
+                j += 1;
+            }
+            let run = &out[..j - i];
+            i = j;
+            if closed.contains(&fd) {
+                continue;
+            }
+            if delay > 0 {
+                let due = sys::monotonic_ms() + delay;
+                delayed.extend(run.iter().map(|rep| (due, fd, *rep)));
+                continue;
+            }
+            match sys::send_frames(fd, run) {
+                // a full channel drops the rest; those lookups time out
+                Ok(_) => {}
+                Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => {}
+                Err(_) => {
+                    close_slot(ep, fd, None);
+                    closed.push(fd);
+                    open_slots -= 1;
+                }
             }
         }
+
+        if open_slots == 0 {
+            sys::exit(0);
+        }
     }
+}
+
+fn close_slot(ep: i32, fd: i32, violation: Option<u64>) {
+    if let Some(reason) = violation {
+        log!("protocol violation on fd {fd} ({reason})");
+        let _ = sys::send(
+            fd,
+            &proto::encode_log(proto::LVL_ALERT, proto::LOG_VIOLATION, reason),
+        );
+    }
+    sys::epoll_del(ep, fd);
+    sys::shutdown(fd); // the keeper holds a duplicate
+    sys::close(fd);
 }
 
 #[cfg(test)]
