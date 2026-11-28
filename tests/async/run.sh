@@ -163,7 +163,10 @@ grep -a 'engine killed by signal 9' $RUN/error.log >/dev/null || true
 clean "engine kill"
 
 echo "== load"
-restart "" "keepalive_requests 100000;"
+# before 1.19.7, HTTP/2 had its own per-connection limit
+h2max=""
+[ "$(printf '%s\n' "$NGINX_VERSION" 1.19.7 | sort -V | head -1)" = 1.19.7 ] || h2max="http2_max_requests 100000;"
+restart "" "keepalive_requests 100000; $h2max"
 out=$(h2load --h1 -n 20000 -c 50 -H 'X-Forwarded-For: 192.0.2.1' $URL1 2>&1 | grep 'status codes')
 check "h1 20000 banned -> 403 ($out)" grep -q '0 2xx, 0 3xx, 20000 4xx, 0 5xx' <<<"$out"
 out=$(h2load -n 20000 -c 10 -m 20 -H 'X-Forwarded-For: 10.20.0.1' $URL2 2>&1 | grep 'status codes')

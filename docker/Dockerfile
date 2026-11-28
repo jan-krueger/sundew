@@ -34,9 +34,14 @@ RUN curl -fsSLo /tmp/nginx.tar.gz https://nginx.org/download/nginx-${NGINX_VERSI
  && mv /opt/src/nginx-${NGINX_VERSION} /opt/src/nginx \
  && rm /tmp/nginx.tar.gz \
  && cd /opt/src/nginx \
- && if [ -f src/http/v3/ngx_http_v3.h ]; then echo " --with-http_v3_module" > /opt/src/v3; else : > /opt/src/v3; fi \
- && ./configure ${NGINX_CONFIGURE_ARGS} $(cat /opt/src/v3) \
-        --with-cc-opt="${NGINX_CC_OPT}" --with-ld-opt="${NGINX_LD_OPT}" \
+ && : > /opt/src/extra && : > /opt/src/ccopt \
+ && if [ -f src/http/v3/ngx_http_v3.h ]; then echo " --with-http_v3_module" >> /opt/src/extra; fi \
+ && if ! grep -q pcre2 auto/lib/pcre/conf; then \
+        echo " --without-http_rewrite_module --without-pcre" >> /opt/src/extra; \
+        echo " -Wno-deprecated-declarations" > /opt/src/ccopt; \
+    fi \
+ && ./configure ${NGINX_CONFIGURE_ARGS} $(cat /opt/src/extra) \
+        --with-cc-opt="${NGINX_CC_OPT}$(cat /opt/src/ccopt)" --with-ld-opt="${NGINX_LD_OPT}" \
  && make -j"$(nproc)" \
  && make install \
  && mkdir -p /opt/nginx/modules

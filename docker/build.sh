@@ -3,14 +3,16 @@ set -eu
 
 OBJS=/work/objs
 STAMP="$OBJS/.configure-stamp"
-ARGS="$NGINX_CONFIGURE_ARGS $(cat /opt/src/v3)"
-SUM=$(cat /src/config | sha256sum | cut -d' ' -f1)-$(echo "$ARGS $NGINX_CC_OPT $NGINX_LD_OPT" | sha256sum | cut -d' ' -f1)
+# nginx without PCRE2 support: no rewrite module, OpenSSL 3 deprecations tolerated
+ARGS="$NGINX_CONFIGURE_ARGS $(cat /opt/src/extra)"
+CC_OPT="$NGINX_CC_OPT$(cat /opt/src/ccopt)"
+SUM=$(cat /src/config | sha256sum | cut -d' ' -f1)-$(echo "$ARGS $CC_OPT $NGINX_LD_OPT" | sha256sum | cut -d' ' -f1)
 
 cd /opt/src/nginx
 
 if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP")" != "$SUM" ]; then
     # shellcheck disable=SC2086
-    ./configure $ARGS --with-cc-opt="$NGINX_CC_OPT" --with-ld-opt="$NGINX_LD_OPT" \
+    ./configure $ARGS --with-cc-opt="$CC_OPT" --with-ld-opt="$NGINX_LD_OPT" \
         --builddir="$OBJS" --add-dynamic-module=/src >/work/configure.log 2>&1 \
         || { tail -30 /work/configure.log; exit 1; }
     echo "$SUM" > "$STAMP"
