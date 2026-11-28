@@ -153,14 +153,30 @@ rm -f /tmp/codes.*
 for ip in $(ips 10 5); do
     (curl -s -o /dev/null -w '%{http_code}' -H "X-Forwarded-For: $ip" $URL1 > /tmp/codes.$ip) &
 done
-sleep 0.03
+# all ten lookups are with the engine (delayed) before it dies
+wait_for '[ "$(curl -s http://127.0.0.1:8080/stats | python3 -I -c "import json,sys; print(json.load(sys.stdin)[\"counters\"][\"lookups\"])")" -ge 10 ]'
 kill -9 "$(engines)"
 wait
-check "lost replies fail closed (403)" [ "$(cat /tmp/codes.* | grep -o 403 | wc -l)" = 10 ]
+check "lost replies fail closed (403) ($(cat /tmp/codes.* | fold -w3 | sort | uniq -c | tr -s " " | tr "\n" ","))" [ "$(cat /tmp/codes.* | grep -o 403 | wc -l)" = 10 ]
 check "engine restarted" wait_for '[ "$(count engines)" = 1 ]'
 check "serving after restart" wait_for '[ "$(h1 192.0.2.2)" = 200 ]'
 grep -a 'engine killed by signal 9' $RUN/error.log >/dev/null || true
 clean "engine kill"
+
+echo "== engine stalled: more requests than the channel holds"
+stop_all
+MAIN="worker_rlimit_nofile 8192;" HTTP="sundew_lookup_timeout 500ms;" conf
+sed -i 's/worker_connections 1024/worker_connections 4096/' $CONF
+start
+kill -STOP "$(engines)"
+out=$(python3 -I /src/tests/async/burst.py 1400 3)
+kill -CONT "$(engines)"
+check "every request answered, fail closed ($out)" [ "$out" = "403:1400 none:0" ]
+busy=$(curl -s http://127.0.0.1:8080/stats | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["counters"]["busy"])')
+check "the overflow counted as busy ($busy)" [ "$busy" -gt 0 ]
+check "logged" grep -aq 'send to helper failed' $RUN/error.log
+check "serving after the stall" wait_for '[ "$(h1 10.78.0.1)" = 200 ]'
+clean "engine stall"
 
 echo "== load"
 # before 1.19.7, HTTP/2 had its own per-connection limit
