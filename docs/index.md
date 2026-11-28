@@ -96,7 +96,7 @@ Both can read the same set: the firewall can drop what nginx never needs to see.
 
 </div>
 
-!!! note "Version 0.3"
+!!! note "Version 0.4"
     These pages follow `main`; the
     [changelog](https://github.com/jan-krueger/sundew/blob/main/CHANGELOG.md)
     says what each release contains.

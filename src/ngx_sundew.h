@@ -12,7 +12,7 @@
 #include "sw_proto.h"
 
 
-#define SUNDEW_VERSION  "0.3.0"
+#define SUNDEW_VERSION  "0.4.0"
 
 
 typedef struct {

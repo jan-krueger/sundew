@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-28
+
 ### Added
 - Changes to nftables sets reach nginx at once: the helper listens to the
   kernel's change notifications and drops the affected cached answers, for one
@@ -17,6 +19,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the helper exchange questions and answers in batches. Under a flood of
   new client addresses, nginx serves noticeably more requests, and the
   helper has more room before it becomes the limit.
+- Each worker counts the statistics in its own memory, so servers with many
+  workers no longer contend on every request to count it.
 - Module and helper speak protocol 4: install both from the same release.
 
 ### Fixed
@@ -118,7 +122,8 @@ The first release.
   and UndefinedBehaviorSanitizer, across reloads, binary upgrades, worker and
   helper crashes, client aborts and HTTP/2 and HTTP/3 stream resets.
 
-[Unreleased]: https://github.com/jan-krueger/sundew/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jan-krueger/sundew/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jan-krueger/sundew/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jan-krueger/sundew/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jan-krueger/sundew/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jan-krueger/sundew/releases/tag/v0.1.0
