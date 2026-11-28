@@ -1,8 +1,9 @@
 name: targets
 
-# A change to release/targets.json on main cuts a patch release of the latest
-# release for the targets it lacks: the release's code, the new target list and
-# checksums, a version bump and a CHANGELOG entry. Releases stay immutable.
+# A change to release/targets.json on main ships the targets the latest release
+# lacks, built from that release's code. A mutable release gets them added
+# (never replacing a file); an immutable one gets a patch release: its code,
+# the new target list and checksums, a version bump and a CHANGELOG entry.
 
 on:
   push:
@@ -17,56 +18,151 @@ concurrency:
   group: targets
   cancel-in-progress: false
 
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/sundew
+
 jobs:
-  cut:
+  plan:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     outputs:
-      tag: ${{ steps.cut.outputs.tag }}
-      base: ${{ steps.cut.outputs.base }}
-      summary: ${{ steps.cut.outputs.summary }}
+      base: ${{ steps.plan.outputs.base }}
+      version: ${{ steps.plan.outputs.version }}
+      targets: ${{ steps.plan.outputs.targets }}
+      images: ${{ steps.plan.outputs.images }}
+      immutable: ${{ steps.plan.outputs.immutable }}
+      latest: ${{ steps.plan.outputs.latest }}
+      summary: ${{ steps.plan.outputs.summary }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
-      - id: cut
+          persist-credentials: false
+      - id: plan
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           base=$(gh release view --json tagName -q .tagName)
           missing=$(python3 .github/scripts/targets.py missing "$base")
-          if [ "$missing" = "[]" ]; then
-              echo "$base has every target"
-              exit 0
-          fi
+          images=$(echo "$missing" | python3 -c 'import json,sys; print(json.dumps([t for t in json.load(sys.stdin) if t.get("image")]))')
           summary=$(echo "$missing" | python3 .github/scripts/targets.py summary)
-          next=$(python3 .github/scripts/targets.py next-patch "$base")
-          echo "$next: $base plus $summary"
+          immutable=$(python3 .github/scripts/targets.py immutable "$base")
+          {
+            echo "base=$base"
+            echo "version=${base#v}"
+            echo "targets=$missing"
+            echo "images=$images"
+            echo "immutable=$immutable"
+            echo "latest=$(python3 .github/scripts/targets.py latest-image)"
+            echo "summary=$summary"
+          } >> "$GITHUB_OUTPUT"
+          echo "$base (immutable: $immutable) lacks: ${summary:-nothing}"
 
+  # ---- mutable release: add the missing targets to it ----
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.targets != '[]' && needs.plan.outputs.immutable == 'false'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.plan.outputs.base }}
+      version: ${{ needs.plan.outputs.version }}
+      targets: ${{ needs.plan.outputs.targets }}
+      images: ${{ needs.plan.outputs.images }}
+
+  add:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: out
+          merge-multiple: true
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: out/*.tar.gz
+      - name: Add to the release, never replacing a file
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.plan.outputs.base }}
+          SUMMARY: ${{ needs.plan.outputs.summary }}
+        run: |
+          cd out
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --output SHA256SUMS.old
+          existing=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
+          for f in *.tar.gz; do
+              if printf '%s\n' "$existing" | grep -qxF "$f"; then
+                  echo "$f is already in $TAG; refusing to replace it" >&2
+                  exit 1
+              fi
+          done
+          sha256sum -- *.tar.gz > new.sums
+          cat SHA256SUMS.old new.sums > SHA256SUMS
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" -- *.tar.gz
+          # SHA256SUMS only grows: every earlier line is kept as it was
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber SHA256SUMS
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > notes.md
+          printf '\n\nAdded %s: prebuilt modules for %s.\n' "$(date -u +%F)" "$SUMMARY" >> notes.md
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
+      - name: Latest image tags
+        if: needs.plan.outputs.images != '[]'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          TAG: ${{ needs.plan.outputs.base }}
+          LATEST: ${{ needs.plan.outputs.latest }}
+        run: |
+          version=${TAG#v}
+          echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          if docker buildx imagetools inspect "$IMAGE:$version-$LATEST" >/dev/null 2>&1; then
+              docker buildx imagetools create -t "$IMAGE:$version" "$IMAGE:$version-$LATEST"
+              case "$version" in *-*) ;; *) docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$version-$LATEST" ;; esac
+          fi
+
+  # ---- immutable release: cut a patch release ----
+
+  cut:
+    needs: plan
+    if: needs.plan.outputs.targets != '[]' && needs.plan.outputs.immutable == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.cut.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: cut
+        env:
+          BASE: ${{ needs.plan.outputs.base }}
+          SUMMARY: ${{ needs.plan.outputs.summary }}
+        run: |
+          next=$(python3 .github/scripts/targets.py next-patch "$BASE")
+          echo "$next: $BASE plus $SUMMARY"
           tools="$RUNNER_TEMP/main"
           mkdir -p "$tools"
           cp .github/scripts/targets.py release/targets.json versions.mk "$tools/"
-          git switch -q --detach "$base"
+          git switch -q --detach "$BASE"
           cp "$tools/targets.json" release/targets.json
           cp "$tools/versions.mk" versions.mk
-          python3 "$tools/targets.py" bump "${next#v}" "${base#v}" "$summary"
-
+          python3 "$tools/targets.py" bump "${next#v}" "${BASE#v}" "$SUMMARY"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -q -am "chore: release ${next#v}"
           git tag "$next"
           git push origin "refs/tags/$next"
-          {
-            echo "tag=$next"
-            echo "base=${base#v}"
-            echo "summary=$summary"
-          } >> "$GITHUB_OUTPUT"
+          echo "tag=$next" >> "$GITHUB_OUTPUT"
 
   release:
     needs: cut
-    if: needs.cut.outputs.tag != ''
     permissions:
       contents: write
       packages: write
@@ -77,7 +173,7 @@ jobs:
       tag: ${{ needs.cut.outputs.tag }}
 
   changelog:
-    needs: [cut, release]
+    needs: [plan, cut, release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -90,11 +186,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.cut.outputs.tag }}
-          BASE: ${{ needs.cut.outputs.base }}
-          SUMMARY: ${{ needs.cut.outputs.summary }}
+          BASE: ${{ needs.plan.outputs.base }}
+          SUMMARY: ${{ needs.plan.outputs.summary }}
         run: |
           version=${TAG#v}
-          python3 .github/scripts/targets.py changelog "$version" "$BASE" "$SUMMARY"
+          python3 .github/scripts/targets.py changelog "$version" "${BASE#v}" "$SUMMARY"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -q -am "docs: changelog for $version"

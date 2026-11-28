@@ -5,6 +5,7 @@
   targets.py latest-image                          image tag for :latest
   targets.py update                                follow nginx.org and the distributions
   targets.py missing <tag>                         targets without assets in a release
+  targets.py immutable <tag>                       true if assets cannot be added
   targets.py summary < targets                     one line naming targets (JSON list)
   targets.py next-patch <tag>                      next free patch tag after <tag>
   targets.py bump <version> <base> <summary>       version files and CHANGELOG entry
@@ -283,6 +284,8 @@ def main():
         update()
     elif cmd == "missing":
         print(json.dumps(missing(sys.argv[2])))
+    elif cmd == "immutable":
+        print("true" if api(f"releases/tags/{sys.argv[2]}").get("immutable") else "false")
     elif cmd == "summary":
         print(summary(json.load(sys.stdin)))
     elif cmd == "next-patch":
