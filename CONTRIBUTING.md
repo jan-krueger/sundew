@@ -51,5 +51,12 @@ make test-all NGINX_VERSION=1.24.0
 and images all take their matrix from it. Every day `nginx-versions.yml` looks
 for new nginx.org releases and distribution packages, pins their checksums in
 `versions.mk`, tests them and opens a pull request. Merging it makes
-`targets.yml` build the new targets from the latest release tag and add them to
-that release. To ship for another distribution, add a target by hand.
+`targets.yml` cut a patch release: the latest release's code with the new
+target list, a version bump and a CHANGELOG entry, tagged `vX.Y.Z+1`, built and
+published by `release.yml`, then recorded in `CHANGELOG.md` on `main`. Releases
+are immutable, so a new nginx never changes an existing one. To ship for
+another distribution, add a target by hand; merging that cuts a patch release
+too.
+
+If a patch release fails, its tag stays without a release; the next run uses
+the following patch number. Delete the tag if it is in the way.

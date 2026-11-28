@@ -44,8 +44,17 @@ By the end of this page nginx returns 403 to an address you put in a set, and
     `<nginx>` is the version `nginx -v` prints; the module loads only into that
     version. `<arch>` is `amd64` or `arm64`. The latest release covers the two
     newest nginx.org stable and mainline versions and the distributions'
-    current packages; new nginx versions are added to it once they pass the
-    tests.
+    current packages. A new nginx version arrives as a patch release once it
+    passes the tests.
+
+    Check that the tarball was built by Sundew's release workflow, from this
+    repository, before you install it:
+
+    ```bash
+    gh attestation verify sundew-*.tar.gz --repo jan-krueger/sundew
+    ```
+
+    Releases are immutable: once published, their files cannot be changed.
 
     ```bash
     tar xzf sundew-*.tar.gz && cd sundew-*/
