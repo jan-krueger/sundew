@@ -18,6 +18,7 @@
 #define SW_MAX_PENDING      1024        /* power of two */
 #define SW_BUCKETS          256
 #define SW_LATE_GRACE       5000        /* ms a timed-out lookup waits for a late answer */
+#define SW_RECV_BATCH       32          /* replies per recvmmsg() */
 
 
 typedef struct {
@@ -51,6 +52,8 @@ static void sw_client_complete(sw_pending_t *p, ngx_uint_t result,
     uint64_t decided, uint64_t matched);
 static void sw_client_fail_all(ngx_uint_t result);
 static void sw_client_log(ngx_log_t *log, sw_rep_t *rep);
+static void sw_client_reply(ngx_log_t *log, sw_rep_t *rep, size_t len,
+    int flags);
 static void sw_client_release(sw_pending_t *p);
 
 
@@ -477,19 +480,33 @@ sw_client_fail_all(ngx_uint_t result)
 }
 
 
+/* the channel is level-triggered: a short batch leaves the rest for later */
 static void
 sw_client_read_handler(ngx_event_t *rev)
 {
-    ssize_t            n;
-    sw_rep_t           rep;
+    int                i, n;
+    sw_rep_t           reps[SW_RECV_BATCH];
     ngx_err_t          err;
-    sw_pending_t      *p;
+    struct iovec       iov[SW_RECV_BATCH];
+    struct mmsghdr     msgs[SW_RECV_BATCH];
     ngx_connection_t  *c;
 
     c = rev->data;
 
+    for (i = 0; i < SW_RECV_BATCH; i++) {
+        iov[i].iov_base = &reps[i];
+        iov[i].iov_len = sizeof(sw_rep_t);
+    }
+
     for ( ;; ) {
-        n = recv(c->fd, &rep, sizeof(sw_rep_t), MSG_DONTWAIT|MSG_TRUNC);
+        ngx_memzero(msgs, sizeof(msgs));
+
+        for (i = 0; i < SW_RECV_BATCH; i++) {
+            msgs[i].msg_hdr.msg_iov = &iov[i];
+            msgs[i].msg_hdr.msg_iovlen = 1;
+        }
+
+        n = recvmmsg(c->fd, msgs, SW_RECV_BATCH, MSG_DONTWAIT, NULL);
 
         if (n == -1) {
             err = ngx_socket_errno;
@@ -507,63 +524,81 @@ sw_client_read_handler(ngx_event_t *rev)
             n = 0;
         }
 
-        if (n == 0) {
-            ngx_log_error(NGX_LOG_ALERT, rev->log, 0,
-                          "sundew: helper channel closed; lookups now "
-                          "follow the fail policy");
-            sw_client->down = 1;
-            sw_client->conn = NULL;
-            ngx_close_connection(c);
-            sw_client_fail_all(SW_RESULT_DOWN);
-            return;
-        }
+        for (i = 0; i < n || n == 0; i++) {
 
-        if (n != sizeof(sw_rep_t) || rep.magic != SW_FRAME_MAGIC
-            || rep.version != SW_PROTO_VERSION)
-        {
-            ngx_log_error(NGX_LOG_ALERT, rev->log, 0,
-                          "sundew: malformed reply from helper");
-            continue;
-        }
-
-        if (rep.req_id == 0) {
-            if (rep.status & SW_ST_LOG) {
-                sw_client_log(rev->log, &rep);
+            /* the helper never sends an empty frame: end of the channel */
+            if (n == 0 || msgs[i].msg_len == 0) {
+                ngx_log_error(NGX_LOG_ALERT, rev->log, 0,
+                              "sundew: helper channel closed; lookups now "
+                              "follow the fail policy");
+                sw_client->down = 1;
+                sw_client->conn = NULL;
+                ngx_close_connection(c);
+                sw_client_fail_all(SW_RESULT_DOWN);
+                return;
             }
 
-            continue;
+            sw_client_reply(rev->log, &reps[i], msgs[i].msg_len,
+                            msgs[i].msg_hdr.msg_flags);
         }
 
-        p = &sw_client->entries[rep.req_id & (SW_MAX_PENDING - 1)];
-
-        if (p->req_id != rep.req_id) {
-            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, rev->log, 0,
-                           "sundew stale reply req_id:%uD", rep.req_id);
-            continue;
+        if (n < SW_RECV_BATCH) {
+            return;
         }
-
-        ngx_log_debug3(NGX_LOG_DEBUG_HTTP, rev->log, 0,
-                       "sundew reply req_id:%uD decided:%uL matched:%uL",
-                       rep.req_id, rep.decided, rep.matched);
-
-        if (p->op == SW_OP_ADD) {
-            sw_client_add_done(p, rep.status, rep.decided);
-            continue;
-        }
-
-        if (p->late) {
-            ngx_log_debug1(NGX_LOG_DEBUG_HTTP, rev->log, 0,
-                           "sundew late reply req_id:%uD cached", rep.req_id);
-            sw_client_late(p, rep.status == SW_ST_OK ? SW_RESULT_OK
-                                                     : SW_RESULT_ERROR,
-                           rep.decided, rep.matched);
-            continue;
-        }
-
-        sw_client_complete(p, rep.status == SW_ST_OK ? SW_RESULT_OK
-                                                     : SW_RESULT_ERROR,
-                           rep.decided, rep.matched);
     }
+}
+
+
+static void
+sw_client_reply(ngx_log_t *log, sw_rep_t *rep, size_t len, int flags)
+{
+    sw_pending_t  *p;
+
+    if (len != sizeof(sw_rep_t) || (flags & MSG_TRUNC)
+        || rep->magic != SW_FRAME_MAGIC || rep->version != SW_PROTO_VERSION)
+    {
+        ngx_log_error(NGX_LOG_ALERT, log, 0,
+                      "sundew: malformed reply from helper");
+        return;
+    }
+
+    if (rep->req_id == 0) {
+        if (rep->status & SW_ST_LOG) {
+            sw_client_log(log, rep);
+        }
+
+        return;
+    }
+
+    p = &sw_client->entries[rep->req_id & (SW_MAX_PENDING - 1)];
+
+    if (p->req_id != rep->req_id) {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
+                       "sundew stale reply req_id:%uD", rep->req_id);
+        return;
+    }
+
+    ngx_log_debug3(NGX_LOG_DEBUG_HTTP, log, 0,
+                   "sundew reply req_id:%uD decided:%uL matched:%uL",
+                   rep->req_id, rep->decided, rep->matched);
+
+    if (p->op == SW_OP_ADD) {
+        sw_client_add_done(p, rep->status, rep->decided);
+        return;
+    }
+
+    if (p->late) {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, log, 0,
+                       "sundew late reply req_id:%uD cached", rep->req_id);
+        sw_client_late(p, rep->status == SW_ST_OK ? SW_RESULT_OK
+                                                  : SW_RESULT_ERROR,
+                       rep->decided, rep->matched);
+        return;
+    }
+
+    sw_client_complete(p, rep->status == SW_ST_OK ? SW_RESULT_OK
+                                                  : SW_RESULT_ERROR,
+                       rep->decided, rep->matched);
 }
 
 
