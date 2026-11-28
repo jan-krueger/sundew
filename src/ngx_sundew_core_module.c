@@ -6,7 +6,6 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 
-#include <dlfcn.h>
 #include <libgen.h>
 #include <poll.h>
 #include <pwd.h>
@@ -873,29 +872,113 @@ failed:
 }
 
 
+/* hex digits at p; NULL if none or more than 16 */
+static char *
+ngx_sundew_hex(char *p, uint64_t *v)
+{
+    char      *start;
+    u_char     c;
+    uint64_t   x;
+
+    x = 0;
+
+    for (start = p; ; p++) {
+        c = (u_char) *p;
+
+        if (c >= '0' && c <= '9') {
+            c -= '0';
+
+        } else if ((c | 0x20) >= 'a' && (c | 0x20) <= 'f') {
+            c = (c | 0x20) - 'a' + 10;
+
+        } else {
+            break;
+        }
+
+        if (p - start == 16) {
+            return NULL;
+        }
+
+        x = (x << 4) | c;
+    }
+
+    if (p == start) {
+        return NULL;
+    }
+
+    *v = x;
+    return p;
+}
+
+
+/* file of the mapping that holds this code; dladdr() needs glibc 2.34 */
+static ngx_int_t
+ngx_sundew_module_file(char *buf, size_t size)
+{
+    char       line[PATH_MAX + 128], *p, *file;
+    FILE      *f;
+    size_t     n;
+    uint64_t   start, end, addr;
+    ngx_int_t  rc;
+
+    addr = (uint64_t) (uintptr_t) ngx_sundew_core_init_conf;
+    rc = NGX_ERROR;
+
+    f = fopen("/proc/self/maps", "re");
+    if (f == NULL) {
+        return NGX_ERROR;
+    }
+
+    while (fgets(line, sizeof(line), f)) {
+        p = ngx_sundew_hex(line, &start);
+        if (p == NULL || *p != '-') {
+            continue;
+        }
+
+        p = ngx_sundew_hex(p + 1, &end);
+        if (p == NULL || addr < start || addr >= end) {
+            continue;
+        }
+
+        file = strchr(p, '/');
+        if (file == NULL) {
+            break;
+        }
+
+        n = strcspn(file, "\n");
+        if (n < size) {
+            ngx_memcpy(buf, file, n);
+            buf[n] = '\0';
+            rc = NGX_OK;
+        }
+
+        break;
+    }
+
+    fclose(f);
+    return rc;
+}
+
+
 static ngx_int_t
 ngx_sundew_helper_path(ngx_cycle_t *cycle, ngx_sundew_core_conf_t *scf,
     ngx_str_t *path)
 {
     size_t    len;
     char      buf[PATH_MAX], *dir;
-    Dl_info   info;
 
     if (scf->helper_path.len) {
         *path = scf->helper_path;
         return NGX_OK;
     }
 
-    if (dladdr((void *) ngx_sundew_core_init_conf, &info) == 0
-        || info.dli_fname == NULL || info.dli_fname[0] != '/')
-    {
+    if (ngx_sundew_module_file(buf, sizeof(buf)) != NGX_OK) {
         ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
                       "sundew: cannot determine module location; "
                       "set \"sundew_helper_path\"");
         return NGX_ERROR;
     }
 
-    ngx_cpystrn((u_char *) buf, (u_char *) info.dli_fname, sizeof(buf));
     dir = dirname(buf);
 
     len = ngx_strlen(dir) + sizeof("/" SW_HELPER_NAME);
@@ -1794,8 +1877,8 @@ ngx_sundew_verify_no_caps(ngx_cycle_t *cycle)
     char            path[64], line[256];
     FILE           *f;
     DIR            *dir;
+    uint64_t        v;
     ngx_uint_t      bad;
-    unsigned long   v;
     struct dirent  *de;
 
     dir = opendir("/proc/self/task");
@@ -1822,10 +1905,14 @@ ngx_sundew_verify_no_caps(ngx_cycle_t *cycle)
         }
 
         while (fgets(line, sizeof(line), f)) {
+            v = 0;
+
+            /* unparsable counts as holding capabilities */
             if ((ngx_strncmp(line, "CapEff:", 7) == 0
                  || ngx_strncmp(line, "CapPrm:", 7) == 0
                  || ngx_strncmp(line, "CapAmb:", 7) == 0)
-                && sscanf(line + 7, "%lx", &v) == 1 && v != 0)
+                && (ngx_sundew_hex(line + 7 + strspn(line + 7, " \t"), &v)
+                    == NULL || v != 0))
             {
                 line[6] = '\0';
                 ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
