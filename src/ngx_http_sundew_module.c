@@ -954,7 +954,8 @@ ngx_http_sundew_endpoint_send(ngx_http_request_t *r, ngx_uint_t metrics)
                                "# TYPE sundew_%s_total counter\n"
                                "sundew_%s_total %uA\n",
                             sw_stat_names[i], sw_stat_help[i],
-                            sw_stat_names[i], sw_stat_names[i], st->c[i]);
+                            sw_stat_names[i], sw_stat_names[i],
+                            sw_stats_counter(st, i));
         }
 
         p = ngx_sprintf(p, "# HELP sundew_set_matched_total Requests decided "
@@ -962,9 +963,9 @@ ngx_http_sundew_endpoint_send(ngx_http_request_t *r, ngx_uint_t metrics)
                            "# TYPE sundew_set_matched_total counter\n");
 
         for (i = 0; i < SW_STATS_SETS; i++) {
-            if (st->sets[i].name[0]) {
+            if (st->names[i][0]) {
                 p = ngx_sprintf(p, "sundew_set_matched_total{set=\"%s\"} %uA\n",
-                                st->sets[i].name, st->sets[i].matched);
+                                st->names[i], sw_stats_matched(st, i));
             }
         }
 
@@ -977,16 +978,16 @@ ngx_http_sundew_endpoint_send(ngx_http_request_t *r, ngx_uint_t metrics)
 
         for (i = 0; i < SW_STAT_N; i++) {
             p = ngx_sprintf(p, "%s\"%s\":%uA", i ? "," : "",
-                            sw_stat_names[i], st->c[i]);
+                            sw_stat_names[i], sw_stats_counter(st, i));
         }
 
         p = ngx_sprintf(p, "},\"sets\":{");
 
         for (i = 0, first = 1; i < SW_STATS_SETS; i++) {
-            if (st->sets[i].name[0]) {
+            if (st->names[i][0]) {
                 p = ngx_sprintf(p, "%s\"%s\":{\"matched\":%uA}",
-                                first ? "" : ",", st->sets[i].name,
-                                st->sets[i].matched);
+                                first ? "" : ",", st->names[i],
+                                sw_stats_matched(st, i));
                 first = 0;
             }
         }

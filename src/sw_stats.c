@@ -83,15 +83,15 @@ sw_stats_zone_init(ngx_shm_zone_t *zone, void *data)
         n = SW_STATS_SETS;
 
         for (j = 0; j < SW_STATS_SETS; j++) {
-            if (st->sets[j].name[0] == '\0') {
+            if (st->names[j][0] == '\0') {
                 if (n == SW_STATS_SETS) {
                     n = j;
                 }
                 continue;
             }
 
-            if (ngx_strlen(st->sets[j].name) == set[i].name.len
-                && ngx_strncmp(st->sets[j].name, set[i].name.data,
+            if (ngx_strlen(st->names[j]) == set[i].name.len
+                && ngx_strncmp(st->names[j], set[i].name.data,
                                set[i].name.len) == 0)
             {
                 set[i].stat_slot = j;
@@ -100,8 +100,8 @@ sw_stats_zone_init(ngx_shm_zone_t *zone, void *data)
         }
 
         if (set[i].stat_slot == SW_STATS_SETS && n != SW_STATS_SETS) {
-            ngx_memcpy(st->sets[n].name, set[i].name.data, set[i].name.len);
-            st->sets[n].name[set[i].name.len] = '\0';
+            ngx_memcpy(st->names[n], set[i].name.data, set[i].name.len);
+            st->names[n][set[i].name.len] = '\0';
             set[i].stat_slot = n;
         }
     }
@@ -115,14 +115,23 @@ sw_stats_get(void)
 {
     ngx_sundew_core_conf_t  *scf;
 
+    static sw_stats_t       *st;
+    static ngx_cycle_t      *cycle;
+
+    if (cycle == ngx_cycle) {
+        return st;
+    }
+
     scf = (ngx_sundew_core_conf_t *) ngx_get_conf(ngx_cycle->conf_ctx,
                                                   ngx_sundew_core_module);
 
-    if (scf == NULL || scf->stats_zone == NULL) {
-        return NULL;
+    st = (scf && scf->stats_zone) ? scf->stats_zone->data : NULL;
+
+    if (st) {
+        cycle = (ngx_cycle_t *) ngx_cycle;
     }
 
-    return scf->stats_zone->data;
+    return st;
 }
 
 
@@ -134,7 +143,8 @@ sw_stats_inc(ngx_uint_t counter)
     st = sw_stats_get();
 
     if (st) {
-        (void) ngx_atomic_fetch_add(&st->c[counter], 1);
+        (void) ngx_atomic_fetch_add(
+                   &st->c[ngx_worker % SW_STATS_SHARDS][counter], 1);
     }
 }
 
@@ -157,7 +167,40 @@ sw_stats_set_matched(ngx_uint_t set_index)
 
     if (set_index < scf->sets.nelts && set[set_index].stat_slot < SW_STATS_SETS)
     {
-        (void) ngx_atomic_fetch_add(&st->sets[set[set_index].stat_slot].matched,
-                                    1);
+        (void) ngx_atomic_fetch_add(
+                   &st->matched[ngx_worker % SW_STATS_SHARDS]
+                               [set[set_index].stat_slot], 1);
     }
+}
+
+
+ngx_atomic_uint_t
+sw_stats_counter(sw_stats_t *st, ngx_uint_t counter)
+{
+    ngx_uint_t         i;
+    ngx_atomic_uint_t  n;
+
+    n = 0;
+
+    for (i = 0; i < SW_STATS_SHARDS; i++) {
+        n += st->c[i][counter];
+    }
+
+    return n;
+}
+
+
+ngx_atomic_uint_t
+sw_stats_matched(sw_stats_t *st, ngx_uint_t slot)
+{
+    ngx_uint_t         i;
+    ngx_atomic_uint_t  n;
+
+    n = 0;
+
+    for (i = 0; i < SW_STATS_SHARDS; i++) {
+        n += st->matched[i][slot];
+    }
+
+    return n;
 }

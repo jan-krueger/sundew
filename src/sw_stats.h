@@ -13,6 +13,8 @@
 
 
 #define SW_STATS_SETS       128
+#define SW_STATS_SHARDS     64          /* rows of counters, one per worker */
+#define SW_STATS_ZONE_SIZE  (256 * 1024)
 
 enum {
     SW_STAT_CHECKED = 0,
@@ -41,14 +43,14 @@ enum {
 };
 
 
-typedef struct {
-    u_char        name[SW_SETREF_LEN];
-    ngx_atomic_t  matched;
-} sw_stats_set_t;
+/* one cache line or more per worker: no line is written by two workers */
+#define SW_STATS_ROW  ((SW_STAT_N * sizeof(ngx_atomic_t) + 63) / 64 * 64 \
+                       / sizeof(ngx_atomic_t))
 
 typedef struct {
-    ngx_atomic_t    c[SW_STAT_N];
-    sw_stats_set_t  sets[SW_STATS_SETS];
+    ngx_atomic_t    c[SW_STATS_SHARDS][SW_STATS_ROW];
+    ngx_atomic_t    matched[SW_STATS_SHARDS][SW_STATS_SETS];
+    u_char          names[SW_STATS_SETS][SW_SETREF_LEN];
 } sw_stats_t;
 
 
@@ -59,5 +61,7 @@ ngx_int_t sw_stats_zone_init(ngx_shm_zone_t *zone, void *data);
 sw_stats_t *sw_stats_get(void);
 void sw_stats_inc(ngx_uint_t counter);
 void sw_stats_set_matched(ngx_uint_t set_index);
+ngx_atomic_uint_t sw_stats_counter(sw_stats_t *st, ngx_uint_t counter);
+ngx_atomic_uint_t sw_stats_matched(sw_stats_t *st, ngx_uint_t slot);
 
 #endif /* SW_STATS_H */

@@ -370,7 +370,7 @@ ngx_sundew_add_set(ngx_conf_t *cf, ngx_str_t *name, ngx_uint_t role)
         scf->cache_zone = ngx_shared_memory_add(cf, &sw_cache_zone_name, 0,
                                                 &ngx_sundew_core_module);
         scf->stats_zone = ngx_shared_memory_add(cf, &sw_stats_zone_name,
-                                                64 * 1024,
+                                                SW_STATS_ZONE_SIZE,
                                                 &ngx_sundew_core_module);
 
         if (scf->cache_zone == NULL || scf->stats_zone == NULL) {
